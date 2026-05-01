@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node.js (Phase 2以降)
+node_modules/
+dist/
+
+# 環境変数(機密情報)
+.env
+
+# 音声ファイル(個人情報)
+samples/
+recordings/
+*.wav
+*.mp3
+*.opus
+
+# ログ
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
