@@ -10,6 +10,10 @@ dist/
 # 環境変数(機密情報)
 .env
 
+# Google OAuth credentials(機密情報)
+credentials.json
+token.json
+
 # 音声ファイル(個人情報)
 samples/
 recordings/
