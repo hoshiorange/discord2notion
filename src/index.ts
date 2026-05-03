@@ -3,6 +3,7 @@ import { relative } from 'node:path';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
 import { processSession } from './audio.js';
 import { commands, commandsByName } from './commands/index.js';
+import { transcribeAndSave } from './transcribe.js';
 import { type VoiceLeaveResult, voiceManager } from './voice.js';
 
 const token = process.env.DISCORD_TOKEN;
@@ -131,21 +132,49 @@ async function backgroundConvert(
     }
   }
 
+  // Step 1: MP3 mix
+  let mixedMp3: string | null = null;
+  let mp3Info = '';
   try {
     const result = await processSession(sessionDir, files);
-    if (result.mixedMp3) {
-      const relPath = relative(process.cwd(), result.mixedMp3);
-      console.log(`${tag} MP3 生成完了: ${relPath}`);
-      await notifyChannel?.send(
-        `${notifyPrefix} 後の MP3 変換が完了しました\n\`${relPath}\`（${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス）`,
-      );
-    } else {
+    if (!result.mixedMp3) {
       console.log(`${tag} no audio to mix`);
+      return;
     }
+    mixedMp3 = result.mixedMp3;
+    const relPath = relative(process.cwd(), mixedMp3);
+    mp3Info = `🎵 \`${relPath}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス)`;
+    console.log(`${tag} MP3 生成完了: ${relPath}`);
   } catch (err) {
     console.error(`${tag} processSession error:`, err);
     const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
-    await notifyChannel?.send(`⚠️ ${notifyPrefix}後の MP3 変換に失敗しました: ${msg}`);
+    await notifyChannel?.send(`⚠️ ${notifyPrefix} 後の MP3 変換に失敗しました: ${msg}`);
+    return;
+  }
+
+  // Step 2: transcribe
+  try {
+    const transcript = await transcribeAndSave(mixedMp3);
+    const r = transcript.result;
+    const transcriptRel = relative(process.cwd(), transcript.transcriptPath);
+    console.log(`${tag} transcribe 完了: ${r.segments.length} segments`);
+    await notifyChannel?.send(
+      [
+        `${notifyPrefix} 後の処理が完了しました`,
+        mp3Info,
+        `📝 \`${transcriptRel}\` — ${r.segments.length} segments / ${r.duration_sec.toFixed(1)}秒の音声を ${r.elapsed_sec.toFixed(1)}秒で（RT比 ${r.realtime_factor.toFixed(1)}x）`,
+      ].join('\n'),
+    );
+  } catch (err) {
+    console.error(`${tag} transcribe error:`, err);
+    const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
+    await notifyChannel?.send(
+      [
+        `${notifyPrefix} 後の MP3 は生成済みですが文字起こしに失敗しました`,
+        mp3Info,
+        `⚠️ ${msg}`,
+      ].join('\n'),
+    );
   }
 }
 
