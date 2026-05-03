@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
 import { commands, commandsByName } from './commands/index.js';
+import { voiceManager } from './voice.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -65,6 +66,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
         flags: MessageFlags.Ephemeral,
       });
     }
+  }
+});
+
+// Bot が居る VC から人がいなくなったら自動退出する
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  const snap = voiceManager.snapshot();
+  if (!snap.isActive || !snap.channelId) return;
+
+  // Bot の VC から離脱した時のみ処理（他チャンネルのイベントは無視）
+  const leftBotChannel =
+    oldState.channelId === snap.channelId && newState.channelId !== snap.channelId;
+  if (!leftBotChannel) return;
+
+  const botUserId = client.user?.id;
+
+  // Bot 自身が外部要因（kick / move）で VC から外された場合は内部状態を片付ける
+  if (oldState.id === botUserId) {
+    console.log('[voice] Bot が外部要因で VC から離脱、状態をクリーンアップ');
+    voiceManager.leave();
+    return;
+  }
+
+  // 人間が抜けた場合：残ってる人間が0なら自動退出
+  const channel = oldState.channel;
+  if (!channel) return;
+  const humansLeft = channel.members.filter((m) => !m.user.bot).size;
+  const memberTag = oldState.member?.user.tag ?? oldState.id;
+  console.log(`[voice] ${memberTag} が ${channel.name} から離脱、残り ${humansLeft} 人`);
+
+  if (humansLeft === 0) {
+    console.log('[voice] 全員離脱したので自動退出します');
+    voiceManager.leave();
   }
 });
 

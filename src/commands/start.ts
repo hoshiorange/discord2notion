@@ -1,18 +1,59 @@
-import { type ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { recordingState } from '../state.js';
+import {
+  ChannelType,
+  type ChatInputCommandInteraction,
+  GuildMember,
+  MessageFlags,
+  SlashCommandBuilder,
+} from 'discord.js';
+import { voiceManager } from '../voice.js';
 
 export const data = new SlashCommandBuilder()
   .setName('start')
-  .setDescription('録音を開始します（Phase 2 はモック動作）');
+  .setDescription('VC に参加して Opus フレームの受信を開始します');
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
-  const ok = recordingState.start();
-  if (!ok) {
+  if (voiceManager.isActive()) {
     await interaction.reply({
       content: '⚠️ 既に録音中です。停止するには `/stop` を使ってください。',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
-  await interaction.reply('🔴 録音を開始しました（モック）');
+
+  const member = interaction.member;
+  if (!(member instanceof GuildMember)) {
+    await interaction.reply({
+      content: '⚠️ サーバー内でのみ実行可能です。',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const voiceChannel = member.voice.channel;
+  if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+    await interaction.reply({
+      content: '⚠️ ボイスチャンネルに参加してから実行してください。',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // 3秒の窓に入るために即座に reply する。重い join はその後で行い editReply で更新
+  await interaction.reply(`🔵 接続中... (${voiceChannel.name})`);
+
+  try {
+    const result = await voiceManager.join(voiceChannel);
+    if (result.success) {
+      await interaction.editReply(`🔴 録音を開始しました（${result.channelName}）。/stop で停止します`);
+    } else {
+      await interaction.editReply(`⚠️ ${result.error}`);
+    }
+  } catch (err) {
+    console.error('[start] join error:', err);
+    try {
+      await interaction.editReply('⚠️ VC 接続中に予期せぬエラーが発生しました');
+    } catch (innerErr) {
+      console.error('[start] editReply failed:', innerErr);
+    }
+  }
 }
