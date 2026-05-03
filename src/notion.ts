@@ -27,6 +27,7 @@ export interface CreateMeetingPageArgs {
   durationMs: number;
   mp3Url?: string;
   transcriptUrl?: string;
+  participants?: string[];
 }
 
 export interface CreateMeetingPageResult {
@@ -194,12 +195,16 @@ function joinDecisions(decisions: string[]): string {
 }
 
 function buildProperties(args: CreateMeetingPageArgs): Record<string, unknown> {
-  const { summary, startedAt, durationMs, mp3Url, transcriptUrl } = args;
+  const { summary, startedAt, durationMs, mp3Url, transcriptUrl, participants } = args;
 
   const title = formatTitle(startedAt);
   const minutes = Math.max(0, Math.round(durationMs / 60000));
   const decisionsText = joinDecisions(summary.decisions);
   const tagOptions = filterValidTags(summary.tags);
+  const participantOptions = (participants ?? [])
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0)
+    .map((name) => ({ name }));
 
   const props: Record<string, unknown> = {
     タイトル: { title: [{ type: 'text', text: { content: title } }] },
@@ -209,7 +214,7 @@ function buildProperties(args: CreateMeetingPageArgs): Record<string, unknown> {
     ステータス: { status: { name: DEFAULT_STATUS } },
     決定事項: { rich_text: richText(decisionsText) },
     ToDo数: { number: summary.todos.length },
-    参加者: { multi_select: [] },
+    参加者: { multi_select: participantOptions },
   };
 
   if (mp3Url && mp3Url.trim().length > 0) {

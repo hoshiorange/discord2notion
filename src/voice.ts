@@ -69,6 +69,7 @@ function generateSessionId(): string {
 export interface VoiceLeaveResult {
   stats: Map<string, UserStats>;
   durationMs: number;
+  startedAt: Date | null;
   channelName: string | null;
   sessionId: string | null;
   sessionDir: string | null;
@@ -273,6 +274,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
       this.timer = null;
     }
     const durationMs = this.startedAt ? Date.now() - this.startedAt.getTime() : 0;
+    const startedAt = this.startedAt ? new Date(this.startedAt.getTime()) : null;
     const stats = new Map(this.userStats);
     const channelName = this.channelName;
     const sessionId = this.sessionId;
@@ -293,7 +295,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
 
     this.cleanup();
 
-    return { stats, durationMs, channelName, sessionId, sessionDir, textChannelId, files };
+    return { stats, durationMs, startedAt, channelName, sessionId, sessionDir, textChannelId, files };
   }
 
   private cleanup(): void {

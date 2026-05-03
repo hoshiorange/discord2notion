@@ -3,7 +3,7 @@ import { relative } from 'node:path';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
 import { processSession } from './audio.js';
 import { commands, commandsByName } from './commands/index.js';
-import { transcribeAndSave } from './transcribe.js';
+import { runPostMp3Pipeline } from './pipeline.js';
 import { type VoiceLeaveResult, voiceManager } from './voice.js';
 
 const token = process.env.DISCORD_TOKEN;
@@ -111,11 +111,26 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
 
 type ConvertReason = 'auto-leave' | 'timeout';
 
+async function fetchParticipantNames(userIds: string[]): Promise<string[]> {
+  const names: string[] = [];
+  for (const id of userIds) {
+    try {
+      const user = await client.users.fetch(id);
+      const name = user.displayName || user.username || id;
+      names.push(name);
+    } catch (err) {
+      console.warn(`[pipeline] failed to fetch user ${id}:`, err);
+      names.push(id);
+    }
+  }
+  return names;
+}
+
 async function backgroundConvert(
   leaveResult: VoiceLeaveResult,
   reason: ConvertReason,
 ): Promise<void> {
-  const { sessionDir, textChannelId, files } = leaveResult;
+  const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt } = leaveResult;
   if (!sessionDir) return;
   const tag = reason === 'timeout' ? '[timeout]' : '[auto-leave]';
   const notifyPrefix = reason === 'timeout' ? '⏰ 録音時間上限に到達したので自動停止' : '🎵 自動退出';
@@ -152,30 +167,42 @@ async function backgroundConvert(
     return;
   }
 
-  // Step 2: transcribe
-  try {
-    const transcript = await transcribeAndSave(mixedMp3);
-    const r = transcript.result;
-    const transcriptRel = relative(process.cwd(), transcript.transcriptPath);
-    console.log(`${tag} transcribe 完了: ${r.segments.length} segments`);
-    await notifyChannel?.send(
-      [
-        `${notifyPrefix} 後の処理が完了しました`,
-        mp3Info,
-        `📝 \`${transcriptRel}\` — ${r.segments.length} segments / ${r.duration_sec.toFixed(1)}秒の音声を ${r.elapsed_sec.toFixed(1)}秒で（RT比 ${r.realtime_factor.toFixed(1)}x）`,
-      ].join('\n'),
-    );
-  } catch (err) {
-    console.error(`${tag} transcribe error:`, err);
-    const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
-    await notifyChannel?.send(
-      [
-        `${notifyPrefix} 後の MP3 は生成済みですが文字起こしに失敗しました`,
-        mp3Info,
-        `⚠️ ${msg}`,
-      ].join('\n'),
+  // Step 2-5: transcribe → summary → drive → notion をパイプラインで実行
+  const participants = await fetchParticipantNames(files.map((f) => f.userId));
+  const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
+  const progress = await runPostMp3Pipeline({
+    sessionDir,
+    sessionId: sessionId ?? 'unknown',
+    startedAt: effectiveStartedAt,
+    durationMs,
+    mixedMp3Path: mixedMp3,
+    participants,
+  });
+
+  const lines: string[] = [`${notifyPrefix} 後の処理が完了しました`, mp3Info];
+  if (progress.transcript) {
+    const t = progress.transcript;
+    lines.push(
+      `📝 transcript: \`${relative(process.cwd(), t.transcriptPath)}\` — ${t.result.segments.length} segments / RT比 ${t.result.realtime_factor.toFixed(1)}x`,
     );
   }
+  if (progress.summary) {
+    const s = progress.summary;
+    lines.push(`📋 summary: \`${relative(process.cwd(), s.summaryPath)}\``);
+  }
+  if (progress.drive) {
+    lines.push(`☁️ Drive: ${progress.drive.folderUrl}`);
+  }
+  if (progress.notion) {
+    lines.push(`📔 Notion: ${progress.notion.pageUrl}`);
+  }
+  if (progress.failedStage) {
+    const errMsg = progress.failedError?.message?.slice(0, 200) ?? '不明エラー';
+    lines.push(`⚠️ ${progress.failedStage} で失敗: ${errMsg}`);
+  } else {
+    lines[0] = `${notifyPrefix} 後の処理が完走しました ✅`;
+  }
+  await notifyChannel?.send(lines.join('\n'));
 }
 
 // 録音時間上限到達時に発火
