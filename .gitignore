@@ -25,6 +25,9 @@ recordings/
 logs/
 *.log
 
+# 一時ファイル(検証出力等)
+tmp/
+
 # OS
 .DS_Store
 Thumbs.db
