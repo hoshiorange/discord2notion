@@ -130,7 +130,8 @@ async function backgroundConvert(
   leaveResult: VoiceLeaveResult,
   reason: ConvertReason,
 ): Promise<void> {
-  const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt } = leaveResult;
+  const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt, channelName } =
+    leaveResult;
   if (!sessionDir) return;
   const tag = reason === 'timeout' ? '[timeout]' : '[auto-leave]';
   const notifyPrefix = reason === 'timeout' ? '⏰ 録音時間上限に到達したので自動停止' : '🎵 自動退出';
@@ -170,35 +171,40 @@ async function backgroundConvert(
   // Step 2-5: transcribe → summary → drive → notion をパイプラインで実行
   const participants = await fetchParticipantNames(files.map((f) => f.userId));
   const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
-  const progress = await runPostMp3Pipeline({
+  const finalState = await runPostMp3Pipeline({
     sessionDir,
     sessionId: sessionId ?? 'unknown',
     startedAt: effectiveStartedAt,
     durationMs,
     mixedMp3Path: mixedMp3,
+    channelName,
+    textChannelId,
+    files,
     participants,
   });
 
   const lines: string[] = [`${notifyPrefix} 後の処理が完了しました`, mp3Info];
-  if (progress.transcript) {
-    const t = progress.transcript;
+  if (finalState.transcript) {
+    const t = finalState.transcript;
     lines.push(
-      `📝 transcript: \`${relative(process.cwd(), t.transcriptPath)}\` — ${t.result.segments.length} segments / RT比 ${t.result.realtime_factor.toFixed(1)}x`,
+      `📝 transcript: \`${relative(process.cwd(), t.transcriptPath)}\` — ${t.segments} segments / RT比 ${t.rtFactor.toFixed(1)}x`,
     );
   }
-  if (progress.summary) {
-    const s = progress.summary;
-    lines.push(`📋 summary: \`${relative(process.cwd(), s.summaryPath)}\``);
+  if (finalState.summary) {
+    lines.push(`📋 summary: \`${relative(process.cwd(), finalState.summary.summaryPath)}\``);
   }
-  if (progress.drive) {
-    lines.push(`☁️ Drive: ${progress.drive.folderUrl}`);
+  if (finalState.drive) {
+    lines.push(`☁️ Drive: ${finalState.drive.folderUrl}`);
   }
-  if (progress.notion) {
-    lines.push(`📔 Notion: ${progress.notion.pageUrl}`);
+  if (finalState.notion) {
+    lines.push(`📔 Notion: ${finalState.notion.pageUrl}`);
   }
-  if (progress.failedStage) {
-    const errMsg = progress.failedError?.message?.slice(0, 200) ?? '不明エラー';
-    lines.push(`⚠️ ${progress.failedStage} で失敗: ${errMsg}`);
+  if (finalState.failedStage) {
+    const errMsg = finalState.failedError?.slice(0, 200) ?? '不明エラー';
+    lines.push(`⚠️ ${finalState.failedStage} で失敗: ${errMsg}`);
+    lines.push(
+      `クォータ復活など解消後に \`/resume session_id:${finalState.sessionId}\` で再開できます`,
+    );
   } else {
     lines[0] = `${notifyPrefix} 後の処理が完走しました ✅`;
   }

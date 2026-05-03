@@ -1,15 +1,24 @@
 import { type ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { basename, relative } from 'node:path';
 import { processSession } from '../audio.js';
-import { createMeetingPage } from '../notion.js';
-import { summarizeAndSave } from '../summarize.js';
-import { transcribeAndSave } from '../transcribe.js';
-import { uploadSession } from '../drive.js';
+import {
+  type PipelineCallbacks,
+  type PipelineStage,
+  type PipelineState,
+  runPostMp3Pipeline,
+} from '../pipeline.js';
 import { voiceManager } from '../voice.js';
 
 export const data = new SlashCommandBuilder()
   .setName('stop')
   .setDescription('録音を停止し、MP3 → 文字起こし → 要約 → Drive → Notion まで一気通貫で実行します');
+
+const STAGE_LABEL: Record<PipelineStage, string> = {
+  transcribe: '📝 文字起こし',
+  summary: '📋 要約',
+  drive: '☁️ Drive アップロード',
+  notion: '📔 Notion ページ作成',
+};
 
 function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
@@ -39,6 +48,23 @@ async function fetchParticipantNames(
   return names;
 }
 
+function pipelineDoneLine(stage: PipelineStage, state: PipelineState): string {
+  switch (stage) {
+    case 'transcribe':
+      return state.transcript
+        ? `✅ 文字起こし: \`${relative(process.cwd(), state.transcript.transcriptPath)}\` — ${state.transcript.segments} segments / RT比 ${state.transcript.rtFactor.toFixed(1)}x`
+        : '✅ 文字起こし完了';
+    case 'summary':
+      return state.summary
+        ? `✅ 要約: \`${relative(process.cwd(), state.summary.summaryPath)}\``
+        : '✅ 要約完了';
+    case 'drive':
+      return state.drive ? `✅ Drive: ${state.drive.folderUrl}` : '✅ Drive アップロード完了';
+    case 'notion':
+      return state.notion ? `✅ Notion: ${state.notion.pageUrl}` : '✅ Notion ページ作成完了';
+  }
+}
+
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!voiceManager.isActive()) {
     await interaction.reply({
@@ -51,7 +77,8 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   await interaction.reply('⏹️ 録音を停止しています...');
 
   const leaveResult = voiceManager.leave();
-  const { stats, durationMs, startedAt, channelName, sessionId, sessionDir, files } = leaveResult;
+  const { stats, durationMs, startedAt, channelName, sessionId, sessionDir, textChannelId, files } =
+    leaveResult;
 
   const baseLines: string[] = [
     `⏹️ 録音を停止しました（${channelName ?? '不明'} / ${formatDuration(durationMs)}）`,
@@ -103,80 +130,47 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  // === Step 2: transcribe ===
-  await interaction.editReply([...baseLines, '📝 文字起こし中...'].join('\n'));
+  // === Step 2-5: pipeline (transcribe → summary → drive → notion) ===
+  const participants = await fetchParticipantNames(
+    interaction,
+    files.map((f) => f.userId),
+  );
+  const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
 
-  let transcriptPath: string | null = null;
-  try {
-    const transcript = await transcribeAndSave(mixedMp3);
-    transcriptPath = transcript.transcriptPath;
-    const r = transcript.result;
-    baseLines.push(
-      `✅ 文字起こし: \`${relative(process.cwd(), transcriptPath)}\` — ${r.segments.length} segments / RT比 ${r.realtime_factor.toFixed(1)}x`,
-    );
-  } catch (err) {
-    console.error('[stop] transcribe error:', err);
-    baseLines.push(`⚠️ 文字起こし失敗: ${shortError(err)}`);
-    await interaction.editReply(baseLines.join('\n'));
-    return;
-  }
+  const callbacks: PipelineCallbacks = {
+    onStageStart: async (stage) => {
+      await interaction.editReply([...baseLines, `${STAGE_LABEL[stage]} 中...`].join('\n'));
+    },
+    onStageComplete: async (stage, state) => {
+      baseLines.push(pipelineDoneLine(stage, state));
+      await interaction.editReply(baseLines.join('\n'));
+    },
+    onStageFailed: async (stage, error) => {
+      baseLines.push(`⚠️ ${STAGE_LABEL[stage]} 失敗: ${error.message.slice(0, 200)}`);
+      baseLines.push(
+        `クォータ復活など解消後に \`/resume\` で再開できます（セッション: \`${sessionId ?? '不明'}\`）`,
+      );
+      await interaction.editReply(baseLines.join('\n'));
+    },
+  };
 
-  // === Step 3: summarize ===
-  await interaction.editReply([...baseLines, '📋 要約中...'].join('\n'));
-
-  let summaryResult: Awaited<ReturnType<typeof summarizeAndSave>> | null = null;
-  try {
-    summaryResult = await summarizeAndSave(transcriptPath);
-    baseLines.push(`✅ 要約: \`${relative(process.cwd(), summaryResult.summaryPath)}\``);
-  } catch (err) {
-    console.error('[stop] summarize error:', err);
-    baseLines.push(`⚠️ 要約失敗: ${shortError(err)}`);
-    await interaction.editReply(baseLines.join('\n'));
-    return;
-  }
-
-  // === Step 4: Drive upload ===
-  await interaction.editReply([...baseLines, '☁️ Drive へアップロード中...'].join('\n'));
-
-  let driveResult: Awaited<ReturnType<typeof uploadSession>> | null = null;
-  try {
-    driveResult = await uploadSession(sessionDir, [
-      basename(mixedMp3),
-      basename(transcriptPath),
-      basename(summaryResult.summaryPath),
-    ]);
-    baseLines.push(`✅ Drive: ${driveResult.folderUrl}`);
-  } catch (err) {
-    console.error('[stop] drive upload error:', err);
-    baseLines.push(`⚠️ Drive アップロード失敗: ${shortError(err)}`);
-    await interaction.editReply(baseLines.join('\n'));
-    return;
-  }
-
-  // === Step 5: Notion page ===
-  await interaction.editReply([...baseLines, '📔 Notion ページ作成中...'].join('\n'));
-
-  try {
-    const participants = await fetchParticipantNames(
-      interaction,
-      files.map((f) => f.userId),
-    );
-    const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
-    const notion = await createMeetingPage({
-      summary: summaryResult.result,
+  const finalState = await runPostMp3Pipeline(
+    {
+      sessionDir,
       sessionId: sessionId ?? 'unknown',
       startedAt: effectiveStartedAt,
       durationMs,
-      mp3Url: driveResult.fileUrls[basename(mixedMp3)],
-      transcriptUrl: driveResult.fileUrls[basename(transcriptPath)],
+      mixedMp3Path: mixedMp3,
+      channelName,
+      textChannelId,
+      files,
       participants,
-    });
-    baseLines.push(`✅ Notion: ${notion.pageUrl}`);
+    },
+    callbacks,
+  );
+
+  if (!finalState.failedStage) {
     baseLines[0] = `⏹️ 全工程完了 ✅（${channelName ?? '不明'} / ${formatDuration(durationMs)}）`;
-    await interaction.editReply(baseLines.join('\n'));
-  } catch (err) {
-    console.error('[stop] notion error:', err);
-    baseLines.push(`⚠️ Notion ページ作成失敗: ${shortError(err)}`);
     await interaction.editReply(baseLines.join('\n'));
   }
 }
