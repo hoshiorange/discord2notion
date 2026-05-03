@@ -3,7 +3,7 @@ import { relative } from 'node:path';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
 import { processSession } from './audio.js';
 import { commands, commandsByName } from './commands/index.js';
-import { voiceManager } from './voice.js';
+import { type VoiceLeaveResult, voiceManager } from './voice.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -103,18 +103,21 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
 
     // ファイルがあれば fire-and-forget で MP3 変換 + 元テキストチャンネルに通知
     if (leaveResult.files.length > 0 && leaveResult.sessionDir) {
-      void autoLeaveConvert(leaveResult);
+      void backgroundConvert(leaveResult, 'auto-leave');
     }
   }
 });
 
-async function autoLeaveConvert(leaveResult: {
-  sessionDir: string | null;
-  textChannelId: string | null;
-  files: { userId: string; filename: string }[];
-}): Promise<void> {
+type ConvertReason = 'auto-leave' | 'timeout';
+
+async function backgroundConvert(
+  leaveResult: VoiceLeaveResult,
+  reason: ConvertReason,
+): Promise<void> {
   const { sessionDir, textChannelId, files } = leaveResult;
   if (!sessionDir) return;
+  const tag = reason === 'timeout' ? '[timeout]' : '[auto-leave]';
+  const notifyPrefix = reason === 'timeout' ? '⏰ 録音時間上限に到達したので自動停止' : '🎵 自動退出';
 
   let notifyChannel: { send: (content: string) => Promise<unknown> } | null = null;
   if (textChannelId) {
@@ -124,7 +127,7 @@ async function autoLeaveConvert(leaveResult: {
         notifyChannel = ch as { send: (content: string) => Promise<unknown> };
       }
     } catch (err) {
-      console.error('[auto-leave] failed to fetch text channel:', err);
+      console.error(`${tag} failed to fetch text channel:`, err);
     }
   }
 
@@ -132,31 +135,68 @@ async function autoLeaveConvert(leaveResult: {
     const result = await processSession(sessionDir, files);
     if (result.mixedMp3) {
       const relPath = relative(process.cwd(), result.mixedMp3);
-      console.log(`[auto-leave] MP3 生成完了: ${relPath}`);
+      console.log(`${tag} MP3 生成完了: ${relPath}`);
       await notifyChannel?.send(
-        `🎵 自動退出後の MP3 変換が完了しました\n\`${relPath}\`（${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス）`,
+        `${notifyPrefix} 後の MP3 変換が完了しました\n\`${relPath}\`（${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス）`,
       );
     } else {
-      console.log('[auto-leave] no audio to mix');
+      console.log(`${tag} no audio to mix`);
     }
   } catch (err) {
-    console.error('[auto-leave] processSession error:', err);
+    console.error(`${tag} processSession error:`, err);
     const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
-    await notifyChannel?.send(`⚠️ 自動退出後の MP3 変換に失敗しました: ${msg}`);
+    await notifyChannel?.send(`⚠️ ${notifyPrefix}後の MP3 変換に失敗しました: ${msg}`);
   }
 }
+
+// 録音時間上限到達時に発火
+voiceManager.on('timeout', (leaveResult) => {
+  void backgroundConvert(leaveResult, 'timeout');
+});
 
 client.on(Events.Error, (err) => {
   console.error('Discord client error:', err);
 });
 
+let isShuttingDown = false;
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n⏹️ ${signal} 受信、シャットダウンします`);
+
+  // 録音中ならファイルをフラッシュして可能なら MP3 まで生成する
+  if (voiceManager.isActive()) {
+    console.log('[shutdown] 録音中のためファイルをフラッシュ中...');
+    const leaveResult = voiceManager.leave();
+    // ファイルストリームの flush 待ち（OS のバッファ反映時間）
+    await new Promise((r) => setTimeout(r, 500));
+
+    if (leaveResult.files.length > 0 && leaveResult.sessionDir) {
+      console.log('[shutdown] MP3 変換中...');
+      try {
+        const result = await processSession(leaveResult.sessionDir, leaveResult.files);
+        if (result.mixedMp3) {
+          console.log(`[shutdown] MP3 生成完了: ${relative(process.cwd(), result.mixedMp3)}`);
+        }
+      } catch (err) {
+        console.error('[shutdown] MP3 変換失敗:', err);
+      }
+    }
+  }
+
+  try {
+    await client.destroy();
+  } catch (err) {
+    console.error('[shutdown] client.destroy() error:', err);
+  }
+  process.exit(0);
+}
+
 process.on('SIGINT', () => {
-  console.log('\n⏹️ SIGINT 受信、シャットダウンします');
-  void client.destroy().then(() => process.exit(0));
+  void gracefulShutdown('SIGINT');
 });
 process.on('SIGTERM', () => {
-  console.log('\n⏹️ SIGTERM 受信、シャットダウンします');
-  void client.destroy().then(() => process.exit(0));
+  void gracefulShutdown('SIGTERM');
 });
 
 await client.login(token);

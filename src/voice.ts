@@ -12,6 +12,7 @@
  * 拡張子は `.opusraw` （標準の `.opus` / `.ogg` ではないため区別）。
  */
 
+import { EventEmitter } from 'node:events';
 import { mkdirSync, createWriteStream, type WriteStream } from 'node:fs';
 import { join as joinPath, resolve as resolvePath } from 'node:path';
 import {
@@ -46,6 +47,13 @@ export interface VoiceSnapshot {
 
 const RECORDINGS_BASE = resolvePath(process.cwd(), 'recordings');
 
+function getRecordingMaxMinutes(): number {
+  const raw = process.env.RECORDING_MAX_MINUTES;
+  if (!raw) return 480; // default 8h
+  const v = Number.parseFloat(raw);
+  return Number.isFinite(v) && v > 0 ? v : 480;
+}
+
 function pad(n: number): string {
   return n.toString().padStart(2, '0');
 }
@@ -58,7 +66,21 @@ function generateSessionId(): string {
   return `${dateStr}_${timeStr}_${random}`;
 }
 
-class VoiceManager {
+export interface VoiceLeaveResult {
+  stats: Map<string, UserStats>;
+  durationMs: number;
+  channelName: string | null;
+  sessionId: string | null;
+  sessionDir: string | null;
+  textChannelId: string | null;
+  files: { userId: string; filename: string }[];
+}
+
+interface VoiceManagerEvents {
+  timeout: [VoiceLeaveResult];
+}
+
+class VoiceManager extends EventEmitter<VoiceManagerEvents> {
   private connection: VoiceConnection | null = null;
   private startedAt: Date | null = null;
   private guildId: string | null = null;
@@ -67,6 +89,7 @@ class VoiceManager {
   private textChannelId: string | null = null;
   private sessionId: string | null = null;
   private sessionDir: string | null = null;
+  private timer: NodeJS.Timeout | null = null;
   private userStats = new Map<string, UserStats>();
   private subscribedUsers = new Set<string>();
   private userFiles = new Map<string, UserFile>();
@@ -135,6 +158,18 @@ class VoiceManager {
       this.cleanup();
       return { success: false, error: 'VC 接続が30秒以内に Ready にならなかったので中断しました' };
     }
+
+    // 録音時間上限タイマー
+    const maxMinutes = getRecordingMaxMinutes();
+    console.log(`[voice] 録音時間上限: ${maxMinutes} 分`);
+    this.timer = setTimeout(
+      () => {
+        console.log(`[voice] 録音時間上限 ${maxMinutes} 分に到達、自動停止します`);
+        const leaveResult = this.leave();
+        this.emit('timeout', leaveResult);
+      },
+      maxMinutes * 60 * 1000,
+    );
 
     return { success: true, channelName: channel.name, sessionId, sessionDir };
   }
@@ -232,15 +267,11 @@ class VoiceManager {
     return this.channelName;
   }
 
-  leave(): {
-    stats: Map<string, UserStats>;
-    durationMs: number;
-    channelName: string | null;
-    sessionId: string | null;
-    sessionDir: string | null;
-    textChannelId: string | null;
-    files: { userId: string; filename: string }[];
-  } {
+  leave(): VoiceLeaveResult {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
     const durationMs = this.startedAt ? Date.now() - this.startedAt.getTime() : 0;
     const stats = new Map(this.userStats);
     const channelName = this.channelName;
@@ -266,6 +297,10 @@ class VoiceManager {
   }
 
   private cleanup(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
     if (this.connection) {
       this.connection.destroy();
     }
