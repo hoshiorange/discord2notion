@@ -28,3 +28,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Claude Code（個人ワークフロー設定）
+.mcp.json
+team/
+CLAUDE.md
