@@ -27,6 +27,9 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   const channelLabel = voiceManager.channelLabel() ?? snapshot.channelId ?? '不明';
   const duration = snapshot.durationMs !== null ? formatDuration(snapshot.durationMs) : '不明';
   lines.push(`🔴 録音中（${channelLabel} / ${duration} 経過）`);
+  if (snapshot.sessionId) {
+    lines.push(`セッション: \`${snapshot.sessionId}\``);
+  }
 
   if (snapshot.perUserStats.size === 0) {
     lines.push('まだ発話を検出していません。');

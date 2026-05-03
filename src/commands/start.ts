@@ -9,7 +9,7 @@ import { voiceManager } from '../voice.js';
 
 export const data = new SlashCommandBuilder()
   .setName('start')
-  .setDescription('VC に参加して Opus フレームの受信を開始します');
+  .setDescription('VC に参加して録音を開始します（ユーザー別 Ogg/Opus ファイルに保存）');
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   if (voiceManager.isActive()) {
@@ -38,13 +38,17 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  // 3秒の窓に入るために即座に reply する。重い join はその後で行い editReply で更新
+  // 3秒の interaction 応答窓を確保するため即座に reply
   await interaction.reply(`🔵 接続中... (${voiceChannel.name})`);
 
   try {
     const result = await voiceManager.join(voiceChannel);
     if (result.success) {
-      await interaction.editReply(`🔴 録音を開始しました（${result.channelName}）。/stop で停止します`);
+      await interaction.editReply(
+        `🔴 録音を開始しました（${result.channelName}）\n` +
+          `セッション ID: \`${result.sessionId}\`\n` +
+          `/stop で停止します`,
+      );
     } else {
       await interaction.editReply(`⚠️ ${result.error}`);
     }
