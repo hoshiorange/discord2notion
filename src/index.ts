@@ -1,5 +1,7 @@
 import 'dotenv/config';
+import { relative } from 'node:path';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
+import { processSession } from './audio.js';
 import { commands, commandsByName } from './commands/index.js';
 import { voiceManager } from './voice.js';
 
@@ -97,9 +99,52 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
 
   if (humansLeft === 0) {
     console.log('[voice] 全員離脱したので自動退出します');
-    voiceManager.leave();
+    const leaveResult = voiceManager.leave();
+
+    // ファイルがあれば fire-and-forget で MP3 変換 + 元テキストチャンネルに通知
+    if (leaveResult.files.length > 0 && leaveResult.sessionDir) {
+      void autoLeaveConvert(leaveResult);
+    }
   }
 });
+
+async function autoLeaveConvert(leaveResult: {
+  sessionDir: string | null;
+  textChannelId: string | null;
+  files: { userId: string; filename: string }[];
+}): Promise<void> {
+  const { sessionDir, textChannelId, files } = leaveResult;
+  if (!sessionDir) return;
+
+  let notifyChannel: { send: (content: string) => Promise<unknown> } | null = null;
+  if (textChannelId) {
+    try {
+      const ch = await client.channels.fetch(textChannelId);
+      if (ch && ch.isTextBased() && 'send' in ch && typeof ch.send === 'function') {
+        notifyChannel = ch as { send: (content: string) => Promise<unknown> };
+      }
+    } catch (err) {
+      console.error('[auto-leave] failed to fetch text channel:', err);
+    }
+  }
+
+  try {
+    const result = await processSession(sessionDir, files);
+    if (result.mixedMp3) {
+      const relPath = relative(process.cwd(), result.mixedMp3);
+      console.log(`[auto-leave] MP3 生成完了: ${relPath}`);
+      await notifyChannel?.send(
+        `🎵 自動退出後の MP3 変換が完了しました\n\`${relPath}\`（${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス）`,
+      );
+    } else {
+      console.log('[auto-leave] no audio to mix');
+    }
+  } catch (err) {
+    console.error('[auto-leave] processSession error:', err);
+    const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
+    await notifyChannel?.send(`⚠️ 自動退出後の MP3 変換に失敗しました: ${msg}`);
+  }
+}
 
 client.on(Events.Error, (err) => {
   console.error('Discord client error:', err);

@@ -64,6 +64,7 @@ class VoiceManager {
   private guildId: string | null = null;
   private channelId: string | null = null;
   private channelName: string | null = null;
+  private textChannelId: string | null = null;
   private sessionId: string | null = null;
   private sessionDir: string | null = null;
   private userStats = new Map<string, UserStats>();
@@ -76,6 +77,7 @@ class VoiceManager {
 
   async join(
     channel: VoiceBasedChannel,
+    textChannelId: string | null = null,
   ): Promise<
     | { success: true; channelName: string; sessionId: string; sessionDir: string }
     | { success: false; error: string }
@@ -105,6 +107,7 @@ class VoiceManager {
     this.guildId = channel.guild.id;
     this.channelId = channel.id;
     this.channelName = channel.name;
+    this.textChannelId = textChannelId;
     this.sessionId = sessionId;
     this.sessionDir = sessionDir;
     this.startedAt = new Date();
@@ -235,6 +238,7 @@ class VoiceManager {
     channelName: string | null;
     sessionId: string | null;
     sessionDir: string | null;
+    textChannelId: string | null;
     files: { userId: string; filename: string }[];
   } {
     const durationMs = this.startedAt ? Date.now() - this.startedAt.getTime() : 0;
@@ -242,6 +246,7 @@ class VoiceManager {
     const channelName = this.channelName;
     const sessionId = this.sessionId;
     const sessionDir = this.sessionDir;
+    const textChannelId = this.textChannelId;
 
     const files: { userId: string; filename: string }[] = [];
     for (const [userId, entry] of this.userFiles) {
@@ -257,7 +262,7 @@ class VoiceManager {
 
     this.cleanup();
 
-    return { stats, durationMs, channelName, sessionId, sessionDir, files };
+    return { stats, durationMs, channelName, sessionId, sessionDir, textChannelId, files };
   }
 
   private cleanup(): void {
@@ -269,6 +274,7 @@ class VoiceManager {
     this.guildId = null;
     this.channelId = null;
     this.channelName = null;
+    this.textChannelId = null;
     this.sessionId = null;
     this.sessionDir = null;
     this.userStats.clear();

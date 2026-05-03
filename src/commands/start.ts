@@ -42,7 +42,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   await interaction.reply(`🔵 接続中... (${voiceChannel.name})`);
 
   try {
-    const result = await voiceManager.join(voiceChannel);
+    const result = await voiceManager.join(voiceChannel, interaction.channelId);
     if (result.success) {
       await interaction.editReply(
         `🔴 録音を開始しました（${result.channelName}）\n` +
