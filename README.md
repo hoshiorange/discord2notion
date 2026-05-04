@@ -20,6 +20,8 @@ Discord に完了通知（Drive / Notion へのリンク付き）
 
 すべて自動。会議終わったら数分後には Notion に議事録ページができている。
 
+途中ステージ（要約 / Drive / Notion 等）が一時的に失敗しても、`pipeline-state.json` に状態が永続化されるため、`/resume` で続きから再開できる。
+
 ## 必要な環境
 
 | 種別 | 要件 |
@@ -33,7 +35,9 @@ Discord に完了通知（Drive / Notion へのリンク付き）
 
 ローカルマシンで常駐する前提。クラウドにデプロイするなら GPU 付きインスタンスが必要。
 
-## セットアップ
+## 初期セットアップ（git clone → 動くまで）
+
+新しいマシンでゼロから立ち上げる手順。
 
 ### 1. リポジトリ取得
 
@@ -68,11 +72,16 @@ winget install Gyan.FFmpeg
 
 ### 5. Claude Code
 
-ヘッドレスモードで要約に使用。インストール後 `claude --version` で確認。詳細は [Anthropic Docs](https://docs.claude.com/en/docs/claude-code/overview) 参照。
+ヘッドレスモード（`claude -p`）で要約に使用。インストール後 `claude --version` で確認。詳細は [Anthropic Docs](https://docs.claude.com/en/docs/claude-code/overview) 参照。
 
 ### 6. 各種 API キー取得
 
 `.env` を作成（`.env.example` をコピー）して各値を埋める：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
 
 | キー | 取得方法 |
 | --- | --- |
@@ -81,7 +90,7 @@ winget install Gyan.FFmpeg
 | `NOTION_API_KEY` | [Notion My Integrations](https://www.notion.so/profile/integrations) で Internal Integration 作成 → Token を取得。議事録 DB に Integration を招待 |
 | `NOTION_DATABASE_ID` | 議事録 DB の URL `https://www.notion.so/<ID>?v=...` の `<ID>` 部分 |
 | `GOOGLE_DRIVE_CREDENTIALS` | GCP Console で OAuth Desktop クライアント作成 → JSON ダウンロード → `credentials.json` として配置（パスを指定）|
-| `GOOGLE_DRIVE_REFRESH_TOKEN` | `scripts/test_drive.py` を実行すると OAuth 認可フロー → `.env` に自動書き込み |
+| `GOOGLE_DRIVE_REFRESH_TOKEN` | `python scripts/test_drive.py` を実行すると OAuth 認可フロー → `.env` に自動書き込み |
 
 ### 7. 動作確認
 
@@ -92,14 +101,46 @@ npm run build       # dist/ 生成
 npm start           # Bot 起動
 ```
 
-Bot がログインしたら、招待先の Discord サーバーで `/start` を試す。
+Bot がログインしたら、招待先の Discord サーバーで `/start` を試す。スラッシュコマンドの初回反映には `DISCORD_GUILD_ID` 設定有り → 即時、無し → 最大1時間かかる。
 
-## 起動方法
+## PC 再起動後の起動手順
+
+通常運用時、PC を再起動した後にこの Bot を再起動するには：
+
+```powershell
+cd C:\git\meetingBot
+npm start
+```
+
+これだけ。**PowerShell ウィンドウは閉じない**こと（閉じるとプロセスが終了する）。常駐させたい場合はそのまま開きっぱなしにする。
+
+`npm start` は `dist/index.js` を実行するため、ソース変更後は事前に `npm run build` が必要。
+普段から `.ts` を編集して即反映させたい場合は代わりに `npm run dev`（tsx watch）を使う。
+
+### 起動後の確認
+
+- コンソールに `✅ Logged in as <BotName>#<discriminator>` と表示される
+- Discord の Bot ステータスがオンラインになる
+- Discord で `/status` を打って `🟢 録音していません` が返れば正常
+
+### 中断したパイプラインがある場合
+
+前回起動時に `/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗していたセッションがあれば、`/resume` で再開できる：
+
+```
+/resume                       # 最新の未完セッションを自動再開
+/resume session_id:<ID>       # 特定セッションを指定して再開
+```
+
+完了済みステージはスキップされ、失敗したステージから再実行される。
+
+## 起動方法（npm scripts 一覧）
 
 | コマンド | 用途 |
 | --- | --- |
 | `npm start` | 本番（dist/ から起動）|
 | `npm run dev` | 開発（tsx でホットリロード）|
+| `npm run build` | TypeScript → dist/ |
 | `npm run typecheck` | TypeScript の型チェックのみ |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier 自動整形 |
@@ -108,34 +149,45 @@ Bot がログインしたら、招待先の Discord サーバーで `/start` を
 
 Bot が招待されたサーバーのテキストチャンネルで以下が使える：
 
-| コマンド | 動作 |
-| --- | --- |
-| `/start` | 自分が居る VC に Bot 参加、録音開始。録音中は再度の `/start` は拒否 |
-| `/stop` | 録音停止 → MP3 → 文字起こし → 要約 → Drive → Notion を一気通貫で実行。各段階の進捗が Discord 上に表示される |
-| `/status` | 現在の録音状態（VC名、経過時間、受信フレーム数）を表示 |
+| コマンド | 引数 | 動作 |
+| --- | --- | --- |
+| `/start` | なし | 自分が居る VC に Bot 参加、録音開始。録音中は再度の `/start` は拒否 |
+| `/stop` | なし | 録音停止 → MP3 → 文字起こし → 要約 → Drive → Notion を一気通貫で実行。各段階の進捗が Discord 上に表示される |
+| `/status` | なし | 現在の録音状態（VC名、経過時間、受信フレーム数）を表示 |
+| `/resume` | `session_id`（任意） | 途中で失敗したパイプラインを再開。引数なしなら最新の未完セッション、`session_id` 指定なら特定セッションを再開 |
 
 VC から全員退出した場合 / 録音時間上限（既定 8 時間）に達した場合も、`/stop` 相当のパイプラインが自動実行される。
+
+### `/resume` の使いどころ
+
+- Claude のクォータ枯渇で要約が落ちた → 翌日 `/resume` で再開
+- Drive の認証が切れて失敗 → トークン更新後 `/resume`
+- Notion API が一時的に 5xx を返した → `/resume`
+
+完了済みステージ（例: 文字起こし＋要約まで成功）はスキップされ、失敗したステージ以降のみ再実行される。`recordings/<sessionId>/pipeline-state.json` に状態が保存されている。
 
 ## アーキテクチャ概略
 
 ```
 src/
-├─ index.ts          # エントリポイント。Discord Client、コマンド登録、VoiceStateUpdate ハンドラ、graceful shutdown
+├─ index.ts          # エントリポイント。Discord Client、コマンド登録、VoiceStateUpdate ハンドラ、graceful shutdown、cleanup スケジューラ
 ├─ commands/
 │   ├─ index.ts      # コマンド束ね
 │   ├─ start.ts      # /start: VC 参加と録音開始
 │   ├─ stop.ts       # /stop: 録音停止 + 段階的パイプライン実行
-│   └─ status.ts     # /status: 録音状態表示
-├─ voice.ts          # VoiceManager: VC 接続・Opus パケット受信・ファイル書き込み
+│   ├─ status.ts     # /status: 録音状態表示
+│   └─ resume.ts     # /resume: 失敗パイプラインの再開
+├─ voice.ts          # VoiceManager: VC 接続・Opus パケット受信・ファイル書き込み・自動再接続
 ├─ audio.ts          # processSession: .opusraw → PCM → MP3 ミックス（FFmpeg）
 ├─ transcribe.ts     # Whisper CLI ラッパー（Python 子プロセス）
 ├─ summarize.ts      # Claude Code ヘッドレスで議事録要約
 ├─ drive.ts          # Google Drive アップロード
 ├─ notion.ts         # Notion 議事録ページ生成
-└─ pipeline.ts       # 文字起こし→要約→Drive→Notion を順次実行（自動退出経路で使用）
+├─ pipeline.ts       # 文字起こし→要約→Drive→Notion を順次実行＋ pipeline-state.json 永続化
+└─ cleanup.ts        # 古い完了済みセッションの自動クリーンアップ（起動時 + 24h 間隔）
 
 scripts/
-├─ transcribe.py     # Faster-Whisper CLI（音声 → JSON）
+├─ transcribe.py     # Faster-Whisper CLI（音声 → JSON）。setup_cuda_paths() で Windows DLL 問題に対応
 ├─ test_whisper.py   # Whisper 動作確認
 ├─ test_notion.py    # Notion API 疎通
 ├─ test_discord.py   # Discord Bot Token 疎通
@@ -145,13 +197,15 @@ scripts/
 ├─ test_transcribe.ts        # transcribe.ts 単体検証
 ├─ test_summarize.ts         # summarize.ts 単体検証
 ├─ test_drive_upload.ts      # drive.ts 単体検証
-└─ test_notion_page.ts       # notion.ts 単体検証
+├─ test_notion_page.ts       # notion.ts 単体検証
+└─ test_cleanup.ts           # cleanup.ts 単体検証
 
 recordings/<sessionId>/      # 録音セッションごとのファイル（gitignore 対象）
-├─ <userId>.opusraw  # ユーザー別 Opus パケット（独自フォーマット: 4byte length + payload）
-├─ mixed.mp3         # ミックス済み MP3
-├─ transcript.json   # 文字起こし
-└─ summary.json      # 要約
+├─ <userId>.opusraw   # ユーザー別 Opus パケット（独自フォーマット: 4byte length + payload）
+├─ mixed.mp3          # ミックス済み MP3
+├─ transcript.json    # 文字起こし
+├─ summary.json       # 要約
+└─ pipeline-state.json # 各ステージの完了状況（/resume の判断材料）
 ```
 
 ## トラブルシュート
@@ -183,6 +237,15 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
   - Discord 側で Bot を `selfDeaf: false` で接続できているか（コードで対応済み）
   - 発話者が自動ミュート / プッシュトゥトーク無効になっていないか
 
+### パイプライン途中失敗時の再開
+
+`/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗した場合：
+
+- `recordings/<sessionId>/pipeline-state.json` に失敗ステージと完了済みステージが記録される
+- 原因（クォータ／認証／一時的なネットワーク等）を解消した後、Discord で `/resume` を実行
+- 引数なし `/resume` は最新の未完セッションを自動拾い、`/resume session_id:<ID>` で特定セッションも指定可能
+- 完了済みステージはスキップされる
+
 ### Notion タグ「未知のタグをスキップ」警告
 
 - 原因: 要約 LLM が DB に存在しないタグ名を出力した
@@ -195,12 +258,14 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 - 原因: Notion ページ生成段階で失敗（前段の Drive アップロードまでで止まった）
 - ログで `[pipeline] notion page failed:` を検索 → エラー内容を確認
+- `/resume` で再開可能
 
-### Drive 同名ファイルの重複
+### Drive 同名ファイルの重複（既知問題）
 
 - 原因: 同じセッションフォルダに同名アップロードを繰り返すと、Drive 側で別 fileId として並んで作られる
 - 通常運用ではセッションごとに sessionId フォルダが分かれるため発生しない
-- 再アップロード時は手動で古いものを削除するのが現状の運用
+- `/resume` で Drive ステージを再実行すると稀に発生する。AIP-35 で恒久対応予定
+- 暫定対応: 古いほうを手動削除
 
 ### `.env` のシークレットが正しいのに認証エラー
 
@@ -222,6 +287,7 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 **任意（チューニング）**
 - `DISCORD_GUILD_ID` — Guild 限定でコマンド即時反映
 - `RECORDING_MAX_MINUTES` — 録音上限分（既定 480）
+- `RECORDINGS_RETAIN_DAYS` — 完了済みセッションの保持日数。これより古いものは起動時 / 24h 周期で自動削除（既定 30）
 - `TRANSCRIBE_TIMEOUT_MS` — Whisper タイムアウト（既定 600000）
 - `SUMMARIZE_TIMEOUT_MS` — Claude 要約タイムアウト（既定 600000）
 - `PYTHON_BIN` — Python 実行ファイル指定（既定 `.venv/Scripts/python.exe` 自動検出）
