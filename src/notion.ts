@@ -6,13 +6,14 @@
  *   - DB プロパティ (11 個。`作成日時` は Notion 自動付与なので書き込まない):
  *       タイトル / 日付 / 会議時間(分) / 参加者 / タグ / ステータス /
  *       決定事項 / ToDo数 / 音声ファイル / 文字起こし
- *   - ページ本文: 概要 / 議題 / 決定事項 / ToDo / 次回までに確認すること
+ *   - ページ本文: 概要 / 議題 / 決定事項 / ToDo / 次回までに確認すること / 発言時間（AIP-37）
  */
 
 import { Client } from '@notionhq/client';
 
 import { getLogger } from './logger.js';
 import type { SummaryResult } from './summarize.js';
+import type { TranscribeSegment } from './transcribe.js';
 
 const log = getLogger('notion');
 
@@ -31,6 +32,12 @@ export interface CreateMeetingPageArgs {
   mp3Url?: string;
   transcriptUrl?: string;
   participants?: string[];
+  /**
+   * AIP-37: 議事録本文末尾に「発言時間」セクション（話者別の発言時間サマリ）を追加するための segments。
+   * 各 segment の `end - start` を speaker 単位で合算して長い順に表示する。speaker 未設定は「不明」扱い。
+   * フル文字起こしは Drive 上の transcript.json を参照する設計（Notion ブロック制限を回避）。
+   */
+  transcriptSegments?: TranscribeSegment[];
 }
 
 export interface CreateMeetingPageResult {
@@ -129,6 +136,61 @@ function buildSummaryParagraphs(text: string): ReturnType<typeof paragraph>[] {
   return lines.map((l) => paragraph(l));
 }
 
+/** AIP-37: 秒数を「45 秒」or「12 分 30 秒」フォーマットに整形。5分未満は秒のみ。 */
+export function formatSpeakingDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 5 * 60) {
+    return `${total} 秒`;
+  }
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m} 分 ${s.toString().padStart(2, '0')} 秒`;
+}
+
+/** AIP-37: 話者ごとの発言時間 (end-start の合計) を発言時間長い順で計算する。 */
+export function aggregateSpeakingTimes(
+  segments: TranscribeSegment[],
+): { speaker: string; seconds: number }[] {
+  const totals = new Map<string, number>();
+  for (const seg of segments) {
+    const speaker = seg.speaker?.trim() && seg.speaker.trim().length > 0 ? seg.speaker.trim() : '不明';
+    const dur = Math.max(0, seg.end - seg.start);
+    totals.set(speaker, (totals.get(speaker) ?? 0) + dur);
+  }
+  return [...totals.entries()]
+    .map(([speaker, seconds]) => ({ speaker, seconds }))
+    .sort((a, b) => b.seconds - a.seconds);
+}
+
+/** AIP-37: 「**話者**: XX 秒」形式の bullet ブロックを作る（話者は bold）。 */
+function speakingTimeBullet(speaker: string, durationLabel: string): unknown {
+  return {
+    object: 'block',
+    type: 'bulleted_list_item',
+    bulleted_list_item: {
+      rich_text: [
+        {
+          type: 'text',
+          text: { content: `${speaker}: ` },
+          annotations: { bold: true },
+        },
+        { type: 'text', text: { content: durationLabel } },
+      ],
+    },
+  };
+}
+
+/**
+ * AIP-37: transcript segments から「発言時間」セクションのブロックを作る。
+ * 話者ごとに発言時間（end - start の合計）を出し、長い順に bullet で列挙。
+ */
+function buildSpeakingTimeBlocks(segments: TranscribeSegment[]): unknown[] {
+  if (segments.length === 0) return [paragraph('（発言なし）')];
+  const totals = aggregateSpeakingTimes(segments);
+  if (totals.length === 0) return [paragraph('（発言なし）')];
+  return totals.map((t) => speakingTimeBullet(t.speaker, formatSpeakingDuration(t.seconds)));
+}
+
 function formatTodoLine(todo: SummaryResult['todos'][number]): string {
   const owner = todo.owner.trim() || '担当未定';
   const task = todo.task.trim();
@@ -136,7 +198,10 @@ function formatTodoLine(todo: SummaryResult['todos'][number]): string {
   return `${owner}: ${task}${due}`;
 }
 
-function buildChildren(summary: SummaryResult): unknown[] {
+function buildChildren(
+  summary: SummaryResult,
+  transcriptSegments: TranscribeSegment[] | undefined,
+): unknown[] {
   const blocks: unknown[] = [];
 
   blocks.push(heading2('概要'));
@@ -175,6 +240,12 @@ function buildChildren(summary: SummaryResult): unknown[] {
     blocks.push(paragraph('（なし）'));
   } else {
     for (const a of summary.next_actions) blocks.push(bullet(a));
+  }
+
+  // AIP-37: 話者ごとの発言時間サマリ（フル文字起こしは Drive の transcript.json を参照）
+  if (transcriptSegments && transcriptSegments.length > 0) {
+    blocks.push(heading2('発言時間'));
+    blocks.push(...buildSpeakingTimeBlocks(transcriptSegments));
   }
 
   return blocks;
@@ -238,7 +309,7 @@ export async function createMeetingPage(
   const client = new Client({ auth: apiKey });
 
   const properties = buildProperties(args);
-  const children = buildChildren(args.summary);
+  const children = buildChildren(args.summary, args.transcriptSegments);
 
   log.info(
     `creating page: session=${args.sessionId} startedAt=${args.startedAt.toISOString()}`,

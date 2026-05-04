@@ -15,11 +15,12 @@ import { basename, join as joinPath, resolve as resolvePath } from 'node:path';
 
 import type { CreateMeetingPageResult } from './notion.js';
 import type { SummaryResult } from './summarize.js';
+import type { TranscribeResult } from './transcribe.js';
 import type { UploadResult } from './drive.js';
 import { createMeetingPage } from './notion.js';
 import { getLogger } from './logger.js';
 import { summarizeAndSave } from './summarize.js';
-import { transcribeAndSave } from './transcribe.js';
+import { transcribeAndSave, transcribeUsersAndSave } from './transcribe.js';
 import { uploadSession } from './drive.js';
 
 const log = getLogger('pipeline');
@@ -42,6 +43,10 @@ export interface PipelineState {
   files: { userId: string; filename: string }[];
   participants: string[];
   mixedMp3Path: string;
+  /** AIP-37: ユーザー別 WAV（話者識別 transcribe 用）。無ければ mixed.mp3 でフォールバック。 */
+  userWavs?: { userId: string; wavPath: string }[];
+  /** AIP-37: userId → 表示名のマッピング。無ければ userId をそのまま speaker に使う。 */
+  speakerNames?: Record<string, string>;
 
   /** 完了済みステージ（順番通り）。 */
   completedStages: PipelineStage[];
@@ -74,6 +79,10 @@ export interface PipelineInput {
   textChannelId?: string | null;
   files?: { userId: string; filename: string }[];
   participants?: string[];
+  /** AIP-37: ユーザー別 WAV。あれば話者識別 transcribe を使う。 */
+  userWavs?: { userId: string; wavPath: string }[];
+  /** AIP-37: userId → 表示名のマッピング。 */
+  speakerNames?: Record<string, string>;
 }
 
 function asError(e: unknown): Error {
@@ -117,6 +126,8 @@ function createInitialState(input: PipelineInput): PipelineState {
     files: input.files ?? [],
     participants: input.participants ?? [],
     mixedMp3Path: input.mixedMp3Path,
+    userWavs: input.userWavs,
+    speakerNames: input.speakerNames,
     completedStages: [],
     lastUpdated: new Date().toISOString(),
   };
@@ -138,6 +149,9 @@ async function getOrInitState(input: PipelineInput): Promise<PipelineState> {
     existing.participants = input.participants;
   }
   if (input.textChannelId) existing.textChannelId = input.textChannelId;
+  // AIP-37: userWavs / speakerNames は新規入力で更新（resume 時にディスク上の WAV が消えてる可能性を許容）
+  if (input.userWavs) existing.userWavs = input.userWavs;
+  if (input.speakerNames) existing.speakerNames = input.speakerNames;
   await savePipelineState(existing);
   return existing;
 }
@@ -209,14 +223,35 @@ export async function runPostMp3Pipeline(
   const state = await getOrInitState(input);
 
   // Step 1: transcribe
+  // AIP-37: userWavs があり、ディスクに実在するものが1つ以上あればユーザー別 transcribe（話者識別）。
+  // 無ければ従来通り mixed.mp3 を一括 transcribe（後方互換）。
   const r1 = await runStage('transcribe', state, callbacks, async () => {
-    const r = await transcribeAndSave(input.mixedMp3Path);
-    state.transcript = {
-      transcriptPath: r.transcriptPath,
-      segments: r.result.segments.length,
-      rtFactor: r.result.realtime_factor,
-      durationSec: r.result.duration_sec,
-    };
+    const usableUserWavs = (state.userWavs ?? []).filter((u) => existsSync(u.wavPath));
+    if (usableUserWavs.length > 0) {
+      log.info(
+        `transcribe (multi-speaker): ${usableUserWavs.length} user WAV(s) → transcript.json`,
+      );
+      const r = await transcribeUsersAndSave(
+        usableUserWavs,
+        input.sessionDir,
+        state.speakerNames ?? {},
+      );
+      state.transcript = {
+        transcriptPath: r.transcriptPath,
+        segments: r.result.segments.length,
+        rtFactor: r.result.realtime_factor,
+        durationSec: r.result.duration_sec,
+      };
+    } else {
+      log.info('transcribe (single): mixed.mp3 一括（userWavs なし、後方互換フロー）');
+      const r = await transcribeAndSave(input.mixedMp3Path);
+      state.transcript = {
+        transcriptPath: r.transcriptPath,
+        segments: r.result.segments.length,
+        rtFactor: r.result.realtime_factor,
+        durationSec: r.result.duration_sec,
+      };
+    }
   });
   if (!r1.ok) return state;
 
@@ -249,6 +284,9 @@ export async function runPostMp3Pipeline(
     }
     const summaryRaw = await readFile(state.summary.summaryPath, 'utf-8');
     const summary = JSON.parse(summaryRaw) as SummaryResult;
+    // AIP-37: transcript.json から segments を読んで Notion 本文に話者付き発言を埋め込む
+    const transcriptRaw = await readFile(state.transcript.transcriptPath, 'utf-8');
+    const transcript = JSON.parse(transcriptRaw) as TranscribeResult;
     const mp3Url = state.drive.fileUrls[basename(input.mixedMp3Path)];
     const transcriptUrl = state.drive.fileUrls[basename(state.transcript.transcriptPath)];
     const r = await createMeetingPage({
@@ -259,6 +297,7 @@ export async function runPostMp3Pipeline(
       mp3Url,
       transcriptUrl,
       participants: state.participants,
+      transcriptSegments: transcript.segments,
     });
     state.notion = r;
   });
@@ -278,6 +317,8 @@ export function inputFromState(state: PipelineState): PipelineInput {
     textChannelId: state.textChannelId,
     files: state.files,
     participants: state.participants,
+    userWavs: state.userWavs,
+    speakerNames: state.speakerNames,
   };
 }
 

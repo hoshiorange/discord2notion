@@ -61,7 +61,13 @@ function formatTimestamp(seconds: number): string {
 
 function buildTranscriptText(segments: TranscribeSegment[]): string {
   return segments
-    .map((seg) => `[${formatTimestamp(seg.start)}] ${seg.text.trim()}`)
+    .map((seg) => {
+      const ts = `[${formatTimestamp(seg.start)}]`;
+      const speaker = seg.speaker?.trim();
+      const body = seg.text.trim();
+      // AIP-37: speaker が入ってれば「[時刻] 話者: 発言」、無ければ従来の「[時刻] 発言」
+      return speaker ? `${ts} ${speaker}: ${body}` : `${ts} ${body}`;
+    })
     .filter((line) => line.trim().length > 0)
     .join('\n');
 }
@@ -72,6 +78,7 @@ function buildPrompt(transcriptText: string): string {
 
 # 重要な指示
 - 出力は **JSON オブジェクトのみ**（コードフェンス \`\`\` や説明文・前置きは一切付けない）
+- 各行は \`[時刻] 話者: 発言\` 形式（話者なしの場合は \`[時刻] 発言\`）。\`todos\` の owner や agenda の文脈で話者情報を活用する
 - 人物名は文字起こしに登場する形のまま使い、推測で補完しない
 - 該当情報がない配列項目は空配列 [] で返す
 - \`title\` は30字以内

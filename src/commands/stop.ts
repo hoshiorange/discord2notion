@@ -51,6 +51,24 @@ async function fetchParticipantNames(
   return names;
 }
 
+/** AIP-37: userId → 表示名のマッピングを解決。fetch 失敗時は userId フォールバック。 */
+async function fetchSpeakerNames(
+  interaction: ChatInputCommandInteraction,
+  userIds: string[],
+): Promise<Record<string, string>> {
+  const map: Record<string, string> = {};
+  for (const id of userIds) {
+    try {
+      const user = await interaction.client.users.fetch(id);
+      map[id] = user.displayName || user.username || id;
+    } catch (err) {
+      log.warn({ err, userId: id }, 'failed to fetch user (speaker name)');
+      map[id] = id;
+    }
+  }
+  return map;
+}
+
 function pipelineDoneLine(stage: PipelineStage, state: PipelineState): string {
   switch (stage) {
     case 'transcribe':
@@ -110,20 +128,22 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  // === Step 1: MP3 mix ===
+  // === Step 1: MP3 mix（AIP-37: ユーザー別 WAV も同時生成） ===
   await interaction.editReply([...baseLines, '', '🔧 MP3 に変換中...'].join('\n'));
 
   let mixedMp3: string | null = null;
+  let userWavs: { userId: string; wavPath: string }[] = [];
   try {
     const result = await processSession(sessionDir, files);
     mixedMp3 = result.mixedMp3;
+    userWavs = result.userWavs;
     if (!mixedMp3) {
       await interaction.editReply([...baseLines, '', '⚠️ ミックスする音声がありませんでした'].join('\n'));
       return;
     }
     baseLines.push('');
     baseLines.push(
-      `✅ MP3: \`${relative(process.cwd(), mixedMp3)}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス)`,
+      `✅ MP3: \`${relative(process.cwd(), mixedMp3)}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス, userWavs=${userWavs.length})`,
     );
   } catch (err) {
     log.error({ err }, 'processSession error');
@@ -134,10 +154,9 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   }
 
   // === Step 2-5: pipeline (transcribe → summary → drive → notion) ===
-  const participants = await fetchParticipantNames(
-    interaction,
-    files.map((f) => f.userId),
-  );
+  const userIds = files.map((f) => f.userId);
+  const participants = await fetchParticipantNames(interaction, userIds);
+  const speakerNames = await fetchSpeakerNames(interaction, userIds);
   const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
 
   const callbacks: PipelineCallbacks = {
@@ -168,6 +187,8 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       textChannelId,
       files,
       participants,
+      userWavs,
+      speakerNames,
     },
     callbacks,
   );

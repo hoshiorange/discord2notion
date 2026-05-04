@@ -21,6 +21,11 @@ export interface TranscribeSegment {
   start: number;
   end: number;
   text: string;
+  /**
+   * 発言者の表示名（または userId フォールバック）。
+   * AIP-37: ユーザー別 transcribe で付与される。一括 transcribe（旧フロー）では undefined。
+   */
+  speaker?: string;
 }
 
 export interface TranscribeResult {
@@ -33,6 +38,20 @@ export interface TranscribeResult {
   elapsed_sec: number;
   realtime_factor: number;
   segments: TranscribeSegment[];
+}
+
+/** AIP-37: ユーザー別 transcribe をマージした結果。 */
+export interface MultiSpeakerTranscribeResult {
+  /** 各ユーザーの transcribe 元データ（参考用、Whisper info を含む）。 */
+  perUser: { userId: string; speaker: string; result: TranscribeResult }[];
+  /** タイムスタンプ昇順にマージされた segment 一覧。各 segment に speaker が入る。 */
+  segments: TranscribeSegment[];
+  /** 全体の最大 duration（最も長いユーザー音声の長さ）。 */
+  duration_sec: number;
+  /** 全ユーザーの合計 elapsed。 */
+  elapsed_sec: number;
+  /** 全体の RT 比（duration_sec / elapsed_sec）。 */
+  realtime_factor: number;
 }
 
 const PROJECT_ROOT = process.cwd();
@@ -137,4 +156,99 @@ export async function transcribeAndSave(audioPath: string): Promise<{
   await writeFile(transcriptPath, JSON.stringify(result, null, 2), 'utf-8');
   log.info(`saved: ${transcriptPath}`);
   return { result, transcriptPath };
+}
+
+/**
+ * AIP-37: ユーザー別 WAV を順次 transcribe し、speaker フィールド付き segments にマージする。
+ *
+ * - GPU メモリ事情から直列実行（大きいモデル + 複数ユーザー並列は RTX 3060 12GB だと厳しい）
+ * - 1ユーザーで失敗しても他ユーザーは続行（部分的な議事録でも価値があるため）
+ * - speaker は `speakerNames[userId]` を優先、無ければ userId を使う
+ */
+export async function transcribeUsers(
+  userWavs: { userId: string; wavPath: string }[],
+  speakerNames: Record<string, string> = {},
+): Promise<MultiSpeakerTranscribeResult> {
+  if (userWavs.length === 0) {
+    throw new Error('userWavs is empty');
+  }
+
+  const perUser: MultiSpeakerTranscribeResult['perUser'] = [];
+  const merged: TranscribeSegment[] = [];
+  let maxDuration = 0;
+  let totalElapsed = 0;
+
+  for (const { userId, wavPath } of userWavs) {
+    const speaker = speakerNames[userId]?.trim() || userId;
+    log.info(`transcribing user=${userId} speaker=${speaker} path=${wavPath}`);
+    let result: TranscribeResult;
+    try {
+      result = await transcribe(wavPath);
+    } catch (err) {
+      log.error({ err, userId, wavPath }, 'user transcribe failed, skipping');
+      continue;
+    }
+    perUser.push({ userId, speaker, result });
+    if (result.duration_sec > maxDuration) maxDuration = result.duration_sec;
+    totalElapsed += result.elapsed_sec;
+    for (const seg of result.segments) {
+      merged.push({ start: seg.start, end: seg.end, text: seg.text, speaker });
+    }
+  }
+
+  if (perUser.length === 0) {
+    throw new Error('all user transcribes failed');
+  }
+
+  merged.sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    return a.end - b.end;
+  });
+
+  const rtFactor = totalElapsed > 0 ? maxDuration / totalElapsed : 0;
+  return {
+    perUser,
+    segments: merged,
+    duration_sec: maxDuration,
+    elapsed_sec: totalElapsed,
+    realtime_factor: rtFactor,
+  };
+}
+
+/**
+ * ユーザー別 transcribe を実行し、`transcript.json` 形式（TranscribeResult 互換 + speaker）で保存する。
+ * 既存の Notion / Drive 連携が `transcript.json` を直接読む箇所は変更不要にするための互換シム。
+ */
+export async function transcribeUsersAndSave(
+  userWavs: { userId: string; wavPath: string }[],
+  outputDir: string,
+  speakerNames: Record<string, string> = {},
+): Promise<{
+  result: TranscribeResult;
+  transcriptPath: string;
+  multi: MultiSpeakerTranscribeResult;
+}> {
+  const multi = await transcribeUsers(userWavs, speakerNames);
+  // TranscribeResult 互換の最上位 JSON を作る（audio_path はマージ元の代表として最初のユーザーを使う）
+  const head = multi.perUser[0];
+  if (!head) {
+    throw new Error('multi.perUser is empty');
+  }
+  const result: TranscribeResult = {
+    audio_path: head.result.audio_path,
+    model: head.result.model,
+    device: head.result.device,
+    language: head.result.language,
+    language_probability: head.result.language_probability,
+    duration_sec: multi.duration_sec,
+    elapsed_sec: multi.elapsed_sec,
+    realtime_factor: multi.realtime_factor,
+    segments: multi.segments,
+  };
+  const transcriptPath = joinPath(outputDir, 'transcript.json');
+  await writeFile(transcriptPath, JSON.stringify(result, null, 2), 'utf-8');
+  log.info(
+    `saved (multi-speaker): ${transcriptPath} — ${multi.perUser.length} speaker(s), ${result.segments.length} segments`,
+  );
+  return { result, transcriptPath, multi };
 }

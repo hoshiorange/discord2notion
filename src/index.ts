@@ -177,6 +177,21 @@ async function fetchParticipantNames(userIds: string[]): Promise<string[]> {
   return names;
 }
 
+/** AIP-37: userId → 表示名のマッピングを解決。fetch 失敗時は userId フォールバック。 */
+async function fetchSpeakerNames(userIds: string[]): Promise<Record<string, string>> {
+  const map: Record<string, string> = {};
+  for (const id of userIds) {
+    try {
+      const user = await client.users.fetch(id);
+      map[id] = user.displayName || user.username || id;
+    } catch (err) {
+      pipelineLog.warn({ err, userId: id }, 'failed to fetch user (speaker name)');
+      map[id] = id;
+    }
+  }
+  return map;
+}
+
 async function backgroundConvert(
   leaveResult: VoiceLeaveResult,
   reason: ConvertReason,
@@ -210,9 +225,10 @@ async function backgroundConvert(
     }
   }
 
-  // Step 1: MP3 mix
+  // Step 1: MP3 mix（AIP-37: ユーザー別 WAV も同時生成）
   let mixedMp3: string | null = null;
   let mp3Info = '';
+  let userWavs: { userId: string; wavPath: string }[] = [];
   try {
     const result = await processSession(sessionDir, files);
     if (!result.mixedMp3) {
@@ -220,9 +236,10 @@ async function backgroundConvert(
       return;
     }
     mixedMp3 = result.mixedMp3;
+    userWavs = result.userWavs;
     const relPath = relative(process.cwd(), mixedMp3);
     mp3Info = `🎵 \`${relPath}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス)`;
-    tlog.info(`MP3 生成完了: ${relPath}`);
+    tlog.info(`MP3 生成完了: ${relPath}, userWavs=${userWavs.length}`);
   } catch (err) {
     tlog.error({ err }, 'processSession error');
     const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
@@ -231,7 +248,9 @@ async function backgroundConvert(
   }
 
   // Step 2-5: transcribe → summary → drive → notion をパイプラインで実行
-  const participants = await fetchParticipantNames(files.map((f) => f.userId));
+  const userIds = files.map((f) => f.userId);
+  const participants = await fetchParticipantNames(userIds);
+  const speakerNames = await fetchSpeakerNames(userIds);
   const effectiveStartedAt = startedAt ?? new Date(Date.now() - durationMs);
   const finalState = await runPostMp3Pipeline({
     sessionDir,
@@ -243,6 +262,8 @@ async function backgroundConvert(
     textChannelId,
     files,
     participants,
+    userWavs,
+    speakerNames,
   });
 
   const lines: string[] = [`${notifyPrefix} 後の処理が完了しました`, mp3Info];
