@@ -1,6 +1,8 @@
-# 議事録Bot
+# 議事録Bot (discord2notion)
 
-Discord ボイスチャンネルでの会議を **録音 → 文字起こし → 要約 → クラウド保存** まで自動化するBot。
+Discord ボイスチャンネルでの会議を **録音 → 文字起こし → 要約 → クラウド保存** まで自動化する Bot。
+
+リポジトリ: <https://github.com/hoshiorange/discord2notion>
 
 ## 何ができるか
 
@@ -18,22 +20,35 @@ Discord ボイスチャンネルでの会議を **録音 → 文字起こし →
 Discord に完了通知（Drive / Notion へのリンク付き）
 ```
 
-すべて自動。会議終わったら数分後には Notion に議事録ページができている。
+すべて自動。会議が終わったら数分後には Notion に議事録ページができている。
 
-途中ステージ（要約 / Drive / Notion 等）が一時的に失敗しても、`pipeline-state.json` に状態が永続化されるため、`/resume` で続きから再開できる。
+途中ステージ（要約 / Drive / Notion 等）が一時的に失敗しても `pipeline-state.json` に状態が永続化されるため、`/resume` で続きから再開できる。詳細は [スラッシュコマンド](#スラッシュコマンド) を参照。
 
 ## 必要な環境
 
-| 種別 | 要件 |
-| --- | --- |
-| OS | Windows 11（macOS / Linux でも動く想定だが未検証）|
-| Node.js | 24.x（LTS 20.x でも動くはず）|
-| Python | 3.12+（`.venv` 推奨）|
-| GPU | NVIDIA GPU（CUDA 対応）— Whisper のため。CPU でも動くが遅い |
-| その他 | FFmpeg 8.x、git |
-| 外部サービス | Discord Bot、Notion Integration、Google Drive OAuth、Claude Code（ヘッドレス）|
-
 ローカルマシンで常駐する前提。クラウドにデプロイするなら GPU 付きインスタンスが必要。
+
+### ハードウェア / ランタイム
+
+| 種別 | 要件 | 必須 / 任意 |
+| --- | --- | --- |
+| OS | Windows 11（macOS / Linux でも動く想定だが未検証） | 必須 |
+| Node.js | 24.x（LTS 20.x でも動くはず） | 必須 |
+| Python | 3.12+（`.venv` 推奨） | 必須 |
+| FFmpeg | 8.x | 必須 |
+| Git | 任意のバージョン | 必須 |
+| GPU | NVIDIA GPU（CUDA 対応）— Whisper 文字起こし用 | 推奨（CPU でも動くが大幅に遅い）|
+
+### 外部サービス
+
+| サービス | 用途 |
+| --- | --- |
+| Discord Bot | VC 参加 / 音声受信 / スラッシュコマンド |
+| Notion Integration | 議事録 DB へのページ作成 |
+| Google Drive OAuth | 音声・文字起こし・要約の保管 |
+| Claude Code (ヘッドレス) | 議事録要約 |
+
+各サービスのアカウント発行・トークン取得・権限設定の詳しい手順は [`docs/SETUP_EXTERNAL.md`](./docs/SETUP_EXTERNAL.md) にまとめている。
 
 ## 初期セットアップ（git clone → 動くまで）
 
@@ -42,7 +57,7 @@ Discord に完了通知（Drive / Notion へのリンク付き）
 ### 1. リポジトリ取得
 
 ```powershell
-git clone <repo-url> meetingBot
+git clone https://github.com/hoshiorange/discord2notion.git meetingBot
 cd meetingBot
 ```
 
@@ -74,23 +89,18 @@ winget install Gyan.FFmpeg
 
 ヘッドレスモード（`claude -p`）で要約に使用。インストール後 `claude --version` で確認。詳細は [Anthropic Docs](https://docs.claude.com/en/docs/claude-code/overview) 参照。
 
-### 6. 各種 API キー取得
+### 6. 外部サービスのセットアップと `.env` 作成
 
-`.env` を作成（`.env.example` をコピー）して各値を埋める：
+Discord / Notion / Google Drive のアカウント発行・トークン取得・権限設定は **手順がそこそこ多い** ので [`docs/SETUP_EXTERNAL.md`](./docs/SETUP_EXTERNAL.md) に分離している。一通り済ませると `.env` が完成する。
+
+ざっくり：
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-| キー | 取得方法 |
-| --- | --- |
-| `DISCORD_TOKEN` | [Discord Developer Portal](https://discord.com/developers/applications) で Bot 作成 → Token 発行。Privileged Intents（Server Members、Message Content）を有効化、サーバーに招待 |
-| `DISCORD_GUILD_ID` | （任意）Discord で開発者モード ON → サーバー右クリック → ID コピー。指定すると Guild 限定でコマンド即時反映 |
-| `NOTION_API_KEY` | [Notion My Integrations](https://www.notion.so/profile/integrations) で Internal Integration 作成 → Token を取得。議事録 DB に Integration を招待 |
-| `NOTION_DATABASE_ID` | 議事録 DB の URL `https://www.notion.so/<ID>?v=...` の `<ID>` 部分 |
-| `GOOGLE_DRIVE_CREDENTIALS` | GCP Console で OAuth Desktop クライアント作成 → JSON ダウンロード → `credentials.json` として配置（パスを指定）|
-| `GOOGLE_DRIVE_REFRESH_TOKEN` | `python scripts/test_drive.py` を実行すると OAuth 認可フロー → `.env` に自動書き込み |
+で雛形を作り、[`docs/SETUP_EXTERNAL.md`](./docs/SETUP_EXTERNAL.md) の手順に沿って各値を埋める。
 
 ### 7. 動作確認
 
@@ -103,7 +113,7 @@ npm start           # Bot 起動
 
 Bot がログインしたら、招待先の Discord サーバーで `/start` を試す。スラッシュコマンドの初回反映には `DISCORD_GUILD_ID` 設定有り → 即時、無し → 最大1時間かかる。
 
-## PC 再起動後 → 初回設定済みの場合の起動手順
+## 初回設定済みの場合の起動手順
 
 `.env` 設定や依存インストールが済んでいる環境（自分の PC を再起動した時、別日に再開する時など）でこの Bot を起動するには：
 
@@ -117,33 +127,6 @@ npm start
 `npm start` は `dist/index.js` を実行するため、ソース変更後は事前に `npm run build` が必要。
 普段から `.ts` を編集して即反映させたい場合は代わりに `npm run dev`（tsx watch）を使う。
 
-### 文字化け対策
-
-#### Windows PowerShell での文字化け
-
-Windows PowerShell（既定の Shift_JIS）で起動するとログ出力が文字化けする場合がある。
-
-**対処法：**
-
-`npm start` の前に以下を一度打って **コードページを UTF-8 に切り替える**：
-
-```powershell
-chcp 65001
-npm start
-```
-
-そのウィンドウを閉じると元に戻るので、毎回必要。
-
-**恒久対処：**
-
-以下のいずれかで常時 UTF-8 環境にできる：
-
-- PowerShell プロファイル（`$PROFILE`）に `chcp 65001 | Out-Null` を追記
-- Windows Terminal を使用（既定で UTF-8）
-- VS Code 統合ターミナルを使用（既定で UTF-8）
-
-**重要：** `logs/` 配下のログファイル自体は UTF-8 で正しく書かれているので、文字化けはコンソール表示時のみの問題。ファイル内容に問題はない。
-
 ### 起動後の確認
 
 - コンソールに `✅ Logged in as <BotName>#<discriminator>` と表示される
@@ -152,14 +135,7 @@ npm start
 
 ### 中断したパイプラインがある場合
 
-前回起動時に `/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗していたセッションがあれば、`/resume` で再開できる：
-
-```
-/resume                       # 最新の未完セッションを自動再開
-/resume session_id:<ID>       # 特定セッションを指定して再開
-```
-
-完了済みステージはスキップされ、失敗したステージから再実行される。
+前回起動時に `/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗していたセッションがあれば、`/resume` で再開できる。詳細は [スラッシュコマンド](#スラッシュコマンド) を参照。
 
 ## 起動方法（npm scripts 一覧）
 
@@ -171,6 +147,23 @@ npm start
 | `npm run typecheck` | TypeScript の型チェックのみ |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier 自動整形 |
+
+### Windows PowerShell でのコンソール文字化け
+
+Windows PowerShell（既定 Shift_JIS）で起動するとコンソールへのログ出力が文字化けする場合がある。`npm start` の前に以下を一度打って **コードページを UTF-8 に切り替える**：
+
+```powershell
+chcp 65001
+npm start
+```
+
+そのウィンドウを閉じると元に戻るので、毎回必要。常時 UTF-8 環境にしたい場合は以下のいずれか：
+
+- PowerShell プロファイル（`$PROFILE`）に `chcp 65001 | Out-Null` を追記
+- Windows Terminal を使用（既定で UTF-8）
+- VS Code 統合ターミナルを使用（既定で UTF-8）
+
+なお `logs/` 配下のログファイル自体は UTF-8 で正しく書かれているので、文字化けはコンソール表示時だけの問題。ファイル内容に影響はない。
 
 ## スラッシュコマンド
 
@@ -266,12 +259,7 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 ### パイプライン途中失敗時の再開
 
-`/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗した場合：
-
-- `recordings/<sessionId>/pipeline-state.json` に失敗ステージと完了済みステージが記録される
-- 原因（クォータ／認証／一時的なネットワーク等）を解消した後、Discord で `/resume` を実行
-- 引数なし `/resume` は最新の未完セッションを自動拾い、`/resume session_id:<ID>` で特定セッションも指定可能
-- 完了済みステージはスキップされる
+`/stop` 後の文字起こし／要約／Drive／Notion のいずれかで失敗した場合は `recordings/<sessionId>/pipeline-state.json` に失敗ステージと完了済みステージが記録される。原因（クォータ／認証／一時的なネットワーク等）を解消した後、Discord で `/resume` を実行する。詳細は [スラッシュコマンド](#スラッシュコマンド) を参照。
 
 ### Notion タグ「未知のタグをスキップ」警告
 
