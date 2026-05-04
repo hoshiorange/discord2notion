@@ -286,7 +286,7 @@ export async function runPostMp3Pipeline(
         basename(state.transcript.transcriptPath),
         basename(state.summary.summaryPath),
       ],
-      { guildConfig },
+      { guildConfig, guildId: state.guildId },
     );
     state.drive = r;
   });

@@ -1,7 +1,10 @@
 /**
  * Google Drive へセッション成果物をアップロードする。
  *
- * フォルダ階層: meetingBot/<YYYY-MM>/<sessionId>/
+ * フォルダ階層: meetingBot/<guildId or "default">/<YYYY-MM>/<sessionId>/
+ *   - AIP-38: マルチ Guild 運用で Guild ごとに出力先が分かれるよう、
+ *     `<guildId>` 層を挿入。guildId 未指定・null・空文字のときは "default" にフォールバック。
+ *
  * 認証: .env の GOOGLE_DRIVE_CREDENTIALS（credentials.json パス）と
  *        GOOGLE_DRIVE_REFRESH_TOKEN を使った OAuth2 リフレッシュフロー。
  * スコープ: https://www.googleapis.com/auth/drive.file
@@ -219,11 +222,23 @@ export interface UploadOptions {
    * AIP-38: Guild 別の認証情報。未指定なら process.env から解決（後方互換）。
    */
   guildConfig?: GuildConfig;
+  /**
+   * AIP-38: フォルダ階層に挿入する Guild ID。指定なし / null / 空文字なら "default" を使用。
+   * 階層は `meetingBot/<guildId or "default">/<YYYY-MM>/<sessionId>/` になる。
+   */
+  guildId?: string | null;
+}
+
+const DEFAULT_GUILD_FOLDER = 'default';
+
+function guildFolderName(guildId: string | null | undefined): string {
+  if (!guildId || guildId.trim().length === 0) return DEFAULT_GUILD_FOLDER;
+  return guildId;
 }
 
 /**
  * セッションディレクトリ内の指定ファイル群を Drive にアップロードする。
- * 階層: meetingBot/<YYYY-MM>/<sessionDir のベース名>/
+ * 階層: meetingBot/<guildId or "default">/<YYYY-MM>/<sessionDir のベース名>/
  *
  * 同フォルダ内に同名ファイルが既にあれば既定で `files.update` による上書きを行う。
  * `options.force=true` を渡すと常に新規作成する（重複が発生する点に注意）。
@@ -257,8 +272,13 @@ export async function uploadSession(
 
   try {
     const rootId = await ensureFolder(drive, ROOT_FOLDER_NAME, null);
-    const monthId = await ensureFolder(drive, monthFolderName(new Date()), rootId);
+    const guildFolder = guildFolderName(options.guildId);
+    const guildFolderId = await ensureFolder(drive, guildFolder, rootId);
+    const monthId = await ensureFolder(drive, monthFolderName(new Date()), guildFolderId);
     const sessionFolderId = await ensureFolder(drive, sessionId, monthId);
+    log.info(
+      `target hierarchy: ${ROOT_FOLDER_NAME}/${guildFolder}/${monthFolderName(new Date())}/${sessionId}`,
+    );
 
     const force = options.force ?? false;
     const fileUrls: Record<string, string> = {};

@@ -36,6 +36,15 @@ config/
 `DISCORD_TOKEN` は **Bot 共通** なので `.env` のみ。
 **Notion / Drive の認証情報だけ** Guild 別に上書きできる。
 
+#### なぜ DISCORD_TOKEN は Guild 別に分けないのか
+
+Discord は **1 Bot Application = 1 Token** の設計。1 つの Bot トークンで複数 Guild に招待でき、Guild ごとに切替える概念がそもそも存在しない。
+
+- **同じ Bot を複数 Guild で使う**（一般的なケース）→ Token 1 つで OK
+- **別 Bot として動かしたい**（例: 配布先ユーザーが自分のサーバ用に独自 Bot を立ち上げる）→ **別マシン or 別プロセスで `npm start`**（別の Bot Application、別 Token、別 `.env`）
+
+つまり `DISCORD_TOKEN` の切替が必要になるのは「別 Bot として運用する」ケースで、そのときは Bot プロセスごと別にする運用になる。同一プロセス内で複数 Token を切替えることは Discord の仕様上想定されていない。
+
 ### JSON スキーマ
 
 すべてのフィールドは **任意**。書いたキーだけ Guild 側で上書きされる（書かないキーは `.env` から引き継ぎ）。
@@ -152,6 +161,56 @@ npm start
      取得した値を Guild JSON に手動コピペ → `.env.bak` を `.env` に戻す
 5. 取得した値を対象 Guild の `config/guilds/<guildId>.json` の
    `googleDriveCredentials` / `googleDriveRefreshToken` に書く
+
+---
+
+## Drive 出力先のフォルダ階層
+
+マルチ Guild 対応に伴い、Drive 上の保存階層には **Guild ID 層** が挟まる。
+これによって「同じ Google アカウント上で複数の Discord サーバを運用する」場合も、
+各サーバの議事録が混ざらず、それぞれ別フォルダに整理される。
+
+```
+（Drive 上）
+meetingBot/
+├─ 1234567890123456789/      ← サーバA の Guild ID
+│   ├─ 2026-05/
+│   │   ├─ 2026-05-04_213000_abc123/
+│   │   │   ├─ mixed.mp3
+│   │   │   ├─ transcript.json
+│   │   │   └─ summary.json
+│   │   └─ 2026-05-05_103000_def456/
+│   │       └─ ...
+│   └─ 2026-06/
+│       └─ ...
+├─ 9876543210987654321/      ← サーバB の Guild ID
+│   └─ 2026-05/
+│       └─ ...
+└─ default/                  ← Guild ID 不明 / DM 経由 / 後方互換セッション
+    └─ 2026-05/
+        └─ ...
+```
+
+| 階層 | 値 |
+| --- | --- |
+| 1 | `meetingBot`（固定） |
+| 2 | `<guildId>` 文字列 / 不明な場合は `default` |
+| 3 | `<YYYY-MM>`（セッション開始の月） |
+| 4 | `<sessionId>`（録音セッション ID） |
+
+### `default` フォルダに入る場合
+
+- DM など Guild に紐づかないコンテキスト（`interaction.guildId === null`）
+- `pipeline-state.json` に `guildId` が記録されていない古いセッションを `/resume` した場合
+  （AIP-38 以前に開始した未完セッションが該当）
+
+実運用ではほぼ使われないが、フォールバック先として用意されている。
+
+### 既存データへの影響
+
+AIP-38 リリース以前にアップロード済みの `meetingBot/<YYYY-MM>/...` フォルダは **そのまま残る**。
+新階層へ自動移動はしないので、必要なら Drive 上で手動移動してください
+（通常は触らず、新規セッションだけ新階層に入る運用で問題なし）。
 
 ---
 
