@@ -103,6 +103,28 @@ async function findFolder(
   return files[0]?.id ?? null;
 }
 
+async function findFileInFolder(
+  drive: drive_v3.Drive,
+  name: string,
+  parentId: string,
+): Promise<string | null> {
+  const conditions = [
+    `name='${escapeQueryValue(name)}'`,
+    `mimeType!='${FOLDER_MIME}'`,
+    `'${parentId}' in parents`,
+    'trashed=false',
+  ];
+
+  const res = await drive.files.list({
+    q: conditions.join(' and '),
+    fields: 'files(id, name)',
+    pageSize: 10,
+    spaces: 'drive',
+  });
+  const files = res.data.files ?? [];
+  return files[0]?.id ?? null;
+}
+
 async function createFolder(
   drive: drive_v3.Drive,
   name: string,
@@ -147,9 +169,23 @@ async function uploadFile(
   drive: drive_v3.Drive,
   parentId: string,
   filePath: string,
-): Promise<{ id: string; webViewLink: string }> {
+  force: boolean,
+): Promise<{ id: string; webViewLink: string; updated: boolean }> {
   const name = basename(filePath);
   const mimeType = inferMimeType(name);
+
+  const existingId = force ? null : await findFileInFolder(drive, name, parentId);
+
+  if (existingId) {
+    const res = await drive.files.update({
+      fileId: existingId,
+      media: { mimeType, body: createReadStream(filePath) },
+      fields: 'id, webViewLink',
+    });
+    const id = res.data.id ?? existingId;
+    const webViewLink = res.data.webViewLink ?? `https://drive.google.com/file/d/${id}/view`;
+    return { id, webViewLink, updated: true };
+  }
 
   const res = await drive.files.create({
     requestBody: { name, parents: [parentId] },
@@ -159,7 +195,7 @@ async function uploadFile(
   const id = res.data.id;
   if (!id) throw new Error(`ファイルアップロード後に id が取得できませんでした: ${name}`);
   const webViewLink = res.data.webViewLink ?? `https://drive.google.com/file/d/${id}/view`;
-  return { id, webViewLink };
+  return { id, webViewLink, updated: false };
 }
 
 function monthFolderName(date: Date): string {
@@ -168,13 +204,22 @@ function monthFolderName(date: Date): string {
   return `${year}-${month}`;
 }
 
+export interface UploadOptions {
+  /** true なら既存同名ファイルがあっても新規作成する（デフォルト false: 既存があれば上書き） */
+  force?: boolean;
+}
+
 /**
  * セッションディレクトリ内の指定ファイル群を Drive にアップロードする。
  * 階層: meetingBot/<YYYY-MM>/<sessionDir のベース名>/
+ *
+ * 同フォルダ内に同名ファイルが既にあれば既定で `files.update` による上書きを行う。
+ * `options.force=true` を渡すと常に新規作成する（重複が発生する点に注意）。
  */
 export async function uploadSession(
   sessionDir: string,
   filenames: string[],
+  options: UploadOptions = {},
 ): Promise<UploadResult> {
   const absSessionDir = resolvePath(sessionDir);
   const sessionId = basename(absSessionDir);
@@ -202,11 +247,17 @@ export async function uploadSession(
     const monthId = await ensureFolder(drive, monthFolderName(new Date()), rootId);
     const sessionFolderId = await ensureFolder(drive, sessionId, monthId);
 
+    const force = options.force ?? false;
     const fileUrls: Record<string, string> = {};
     for (const target of targets) {
-      const { webViewLink } = await uploadFile(drive, sessionFolderId, target.absPath);
+      const { webViewLink, updated } = await uploadFile(
+        drive,
+        sessionFolderId,
+        target.absPath,
+        force,
+      );
       fileUrls[target.name] = webViewLink;
-      log.info(`uploaded: ${target.name} -> ${webViewLink}`);
+      log.info(`${updated ? 'updated' : 'uploaded'}: ${target.name} -> ${webViewLink}`);
     }
 
     const folderUrl = `https://drive.google.com/drive/folders/${sessionFolderId}`;
