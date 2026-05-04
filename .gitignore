@@ -11,10 +11,9 @@ dist/
 .env
 
 # Google OAuth credentials(機密情報)
-credentials.json
+# credentials.json / credentials_*.json / credentials.guild-*.json などを包括的に除外
+credentials*.json
 token.json
-# Guild 別の OAuth credentials（マルチ Guild 運用時、機密情報）
-credentials.guild-*.json
 
 # マルチ Guild 設定（config/guilds/<guildId>.json は機密情報を含むためディレクトリごと無視）
 config/
