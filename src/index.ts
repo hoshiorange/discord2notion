@@ -17,11 +17,26 @@ const pipelineLog = getLogger('pipeline');
 
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-  log.error('DISCORD_TOKEN が .env にありません');
+const REQUIRED_ENV_VARS = [
+  'DISCORD_TOKEN',
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_ID',
+  'GOOGLE_DRIVE_CREDENTIALS',
+  'GOOGLE_DRIVE_REFRESH_TOKEN',
+] as const;
+
+const missingEnv = REQUIRED_ENV_VARS.filter((k) => {
+  const v = process.env[k];
+  return !v || v.trim().length === 0;
+});
+if (missingEnv.length > 0) {
+  log.error(
+    `必須の環境変数が .env に設定されていません: ${missingEnv.join(', ')}（.env.example を参照してください）`,
+  );
   process.exit(1);
 }
+
+const token = process.env.DISCORD_TOKEN as string;
 
 const guildId = process.env.DISCORD_GUILD_ID; // optional. あれば Guild 限定登録（即時反映）
 
