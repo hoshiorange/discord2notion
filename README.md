@@ -22,11 +22,17 @@ Discord に完了通知（Drive / Notion へのリンク付き）
 
 すべて自動。会議が終わったら数分後には Notion に議事録ページができている。
 
-### 話者識別（AIP-37）
+### 話者識別
 
 ユーザー別の `.opusraw` をそれぞれ Whisper にかけて発話タイムラインをマージするため、**誰がいつ何を話したか**まで識別される。Notion ページ末尾には参加者ごとの**発言時間サマリ**が自動で挿入される。
 
 途中ステージ（要約 / Drive / Notion 等）が一時的に失敗しても `pipeline-state.json` に状態が永続化されるため、`/resume` で続きから再開できる。詳細は [スラッシュコマンド](#スラッシュコマンド) を参照。
+
+### 同時録音は 1 セッションのみ
+
+1 つの Bot プロセスで同時に録音できるのは **1 サーバ × 1 ボイスチャンネル** だけ。録音中に別サーバ / 別 VC で `/start` を打つと、既存セッションは保護されたまま **2 つ目はエラー（録音中の guild / channel / 経過時間を表示）で弾かれる**。
+
+複数サーバで同時に議事録を録音したい場合は、各サーバの管理者がそれぞれ **自分の Bot Application を Discord Developer Portal で作成し、自分の PC で別プロセスとして起動**する運用が標準（Bot Token は Bot Application ごとに別。同じ Token で複数プロセスは動かない）。
 
 ## 必要な環境
 
@@ -210,7 +216,7 @@ src/
 ├─ pipeline.ts       # 文字起こし→要約→Drive→Notion を順次実行＋ pipeline-state.json 永続化
 ├─ cleanup.ts        # 古い完了済みセッションの自動クリーンアップ（起動時 + 24h 間隔）
 ├─ logger.ts         # pino ベースのロガー（日次ローテート + 自動削除）
-└─ config.ts         # AIP-38: Guild 別の Notion / Drive 認証情報を解決（config/guilds/<guildId>.json）
+└─ config.ts         # Guild 別の Notion / Drive 認証情報を解決（config/guilds/<guildId>.json）
 
 scripts/
 ├─ transcribe.py     # Faster-Whisper CLI（音声 → JSON）。setup_cuda_paths() で Windows DLL 問題に対応
@@ -225,13 +231,13 @@ scripts/
 ├─ test_drive_upload.ts      # drive.ts 単体検証
 ├─ test_notion_page.ts       # notion.ts 単体検証
 ├─ test_cleanup.ts           # cleanup.ts 単体検証
-├─ test_logger.ts            # logger.ts 単体検証（AIP-34）
-├─ test_voice_reconnect.ts   # Voice 自動再接続シナリオ検証（AIP-32）
-├─ test_speaker.ts           # 話者識別パイプライン検証（AIP-37）
-├─ test_stop_flow.ts         # /stop 経路の再現テスト（AIP-37）
-├─ test_drive_dedup.ts       # Drive 同名ファイル上書き検証（AIP-35）
-├─ test_multiguild_config.ts # Guild 別 JSON ローダー検証（AIP-38）
-└─ test_guild_folder_name.ts # resolveGuildFolderName 純関数検証（AIP-38）
+├─ test_logger.ts            # logger.ts 単体検証
+├─ test_voice_reconnect.ts   # Voice 自動再接続シナリオ検証
+├─ test_speaker.ts           # 話者識別パイプライン検証
+├─ test_stop_flow.ts         # /stop 経路の再現テスト
+├─ test_drive_dedup.ts       # Drive 同名ファイル上書き検証
+├─ test_multiguild_config.ts # Guild 別 JSON ローダー検証
+└─ test_guild_folder_name.ts # resolveGuildFolderName 純関数検証
 
 recordings/<sessionId>/      # 録音セッションごとのファイル（gitignore 対象）
 ├─ <userId>.opusraw   # ユーザー別 Opus パケット（独自フォーマット: 4byte length + payload）
@@ -290,7 +296,7 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 ### Drive 同名ファイルの重複
 
-- AIP-35 で対応済み。同じセッションフォルダ内に同名ファイルが既にあれば `files.update` で上書きされるため、`/resume` で Drive ステージを再実行しても重複しない
+- 同じセッションフォルダ内に同名ファイルが既にあれば `files.update` で上書きされるため、`/resume` で Drive ステージを再実行しても重複しない
 - 通常運用でもセッションごとに sessionId フォルダが分かれるため、別セッション間でも衝突しない
 - `force: true` を指定した場合のみ常に新規作成となる（通常パスでは未使用）
 
@@ -313,6 +319,8 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 これらは Bot 起動自体には不要だが、`/stop` 後のパイプライン（Drive アップロード / Notion ページ作成）で参照される。`.env` か Guild 別 JSON のどちらか一方に書かれていれば OK。両方とも空のまま `/start` すると該当ステージで失敗し、`pipeline-state.json` に記録された上で `/resume` 可能。
 
+> **取得方法は [`docs/SETUP_EXTERNAL.md`](./docs/SETUP_EXTERNAL.md) を参照**（Discord Bot Token / Notion Integration & DB ID / Google Drive OAuth credentials & refresh token / Claude Code CLI セットアップを 1 ファイルに集約）。
+
 複数の Discord サーバで運用し **サーバごとに別 Notion DB / 別 Google アカウント** に振り分けたい場合は [`docs/MULTI_GUILD.md`](./docs/MULTI_GUILD.md) を参照（任意・1 サーバ運用なら `.env` 一本で OK）。
 
 **任意（チューニング）**
@@ -324,7 +332,7 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 - `PYTHON_BIN` — Python 実行ファイル指定（既定 `.venv/Scripts/python.exe` 自動検出）
 - `CLAUDE_BIN` — claude CLI 指定（既定 `claude`）
 
-**ログ運用（AIP-34）**
+**ログ運用**
 - `LOG_DIR` — ログ出力ディレクトリ（既定 `logs`）
 - `LOG_LEVEL` — `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`（既定 `info`）
 - `LOG_RETAIN_DAYS` — 古いログファイルの保持日数。これより古い `<LOG_DIR>/*.log` は起動時 + 24h 周期で自動削除（既定 14）

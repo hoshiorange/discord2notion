@@ -258,13 +258,13 @@ meetingBot/
 
 - DM など Guild に紐づかないコンテキスト（`interaction.guildId === null`）
 - `pipeline-state.json` に `guildId` が記録されていない古いセッションを `/resume` した場合
-  （AIP-38 以前に開始した未完セッションが該当）
+  （マルチ Guild 対応以前に開始した未完セッションが該当）
 
 実運用ではほぼ使われないが、フォールバック先として用意されている。
 
 ### 既存データへの影響
 
-AIP-38 リリース以前にアップロード済みの `meetingBot/<YYYY-MM>/...` フォルダは **そのまま残る**。
+マルチ Guild 対応以前にアップロード済みの `meetingBot/<YYYY-MM>/...` フォルダは **そのまま残る**。
 新階層へ自動移動はしないので、必要なら Drive 上で手動移動してください
 （通常は触らず、新規セッションだけ新階層に入る運用で問題なし）。
 
@@ -299,7 +299,7 @@ notion.createMeetingPage({ guildConfig, ... })
 | --- | --- |
 | `config/guilds/` が存在しない | 全 Guild で `.env` 一本（従来動作） |
 | `config/guilds/` はあるが対象 Guild の JSON が無い | その Guild は `.env` 一本（従来動作） |
-| AIP-38 以前の `pipeline-state.json` | `guildId` が無いので `null` 扱い → `.env` 一本（従来動作） |
+| マルチ Guild 対応以前の `pipeline-state.json` | `guildId` が無いので `null` 扱い → `.env` 一本（従来動作） |
 
 ---
 
@@ -311,7 +311,7 @@ notion.createMeetingPage({ guildConfig, ... })
 | ログに「`guild XXX has no config/guilds/XXX.json, using default .env`」と出る | JSON ファイルが見つかっていない。**ファイル名が Guild ID と一致しているか**（前後の空白・拡張子 `.json` を確認） |
 | `failed to read config/guilds/XXX.json` | JSON 構文エラー。エディタで開き直して `}` `,` `"` の閉じ忘れを確認 |
 | サーバA の議事録がサーバB の Notion DB に書き込まれた | JSON のファイル名（Guild ID）が間違っている。Discord の「サーバー ID をコピー」で取り直し |
-| `/resume` で意図しない Guild の設定が使われた | `recordings/<sessionId>/pipeline-state.json` の `guildId` を確認。AIP-38 以前の古い state は `null`、その場合は手動編集するか新セッションで再録音 |
+| `/resume` で意図しない Guild の設定が使われた | `recordings/<sessionId>/pipeline-state.json` の `guildId` を確認。マルチ Guild 対応以前の古い state は `null`、その場合は手動編集するか新セッションで再録音 |
 
 ---
 
