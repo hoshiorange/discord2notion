@@ -1,29 +1,42 @@
 /**
  * AIP-38: Guild ごとに Notion / Google Drive の認証情報を切り替える設定ローダー。
  *
+ * 配置規約:
+ *   config/
+ *     └─ guilds/
+ *         └─ <guildId>.json    # この Guild 専用の設定（存在 = 登録扱い）
+ *
+ * 1 ファイル＝ 1 Guild の JSON で、共通 `.env`（process.env 経由）を上書きする。
+ *
+ * JSON スキーマ（すべて optional。書いたキーだけ Guild 側で上書きされる）:
+ *   {
+ *     "name": "仕事",                                  // 任意。ログ表示用ラベル
+ *     "notionApiKey": "secret_xxx",
+ *     "notionDatabaseId": "xxxxxxxxxxxx",
+ *     "googleDriveCredentials": "credentials.guild-xxx.json",
+ *     "googleDriveRefreshToken": "1//xxx"
+ *   }
+ *
  * 動作:
- *  - `config/guilds.json` で Guild ID → env file をマッピング
- *  - 共通 `.env`（既に `dotenv/config` で `process.env` に展開済み）と Guild 別 env file を merge し、
- *    Guild 側の値で上書きした GuildConfig を返す
- *  - guilds.json 未配置 / 未登録 Guild / `guildId === null` の場合は process.env の値だけを使う（後方互換）
+ *   - `config/guilds/<guildId>.json` が存在 → process.env と JSON を merge（Guild 側優先）
+ *   - 存在しない / `guildId === null` → process.env をそのまま使う（後方互換）
  *
  * 設計上の注意:
- *  - 複数 Guild が並行で動くため `process.env` 自体は書き換えない
- *  - 同じ envFile を複数回読まないよう簡易キャッシュ
+ *   - 複数 Guild が並行動作するため `process.env` 自体は書き換えない
+ *   - 同一ファイルの再読込を避けるため簡易キャッシュを持つ
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { isAbsolute, resolve as resolvePath } from 'node:path';
-import { parse as parseDotenv } from 'dotenv';
+import { resolve as resolvePath } from 'node:path';
 
 import { getLogger } from './logger.js';
 
 const log = getLogger('config');
 
 export interface GuildConfig {
-  /** 解決元の Guild ID（未登録 / null の場合は null）。 */
+  /** 解決元の Guild ID。`config/guilds/<guildId>.json` 未配置や guildId=null の場合も呼び出し時の値を保持。 */
   guildId: string | null;
-  /** ログ等に表示する人間ラベル（任意）。 */
+  /** ログ・運用時の人間ラベル（任意）。JSON の `name` フィールド由来。 */
   guildName?: string;
   notionApiKey: string | undefined;
   notionDatabaseId: string | undefined;
@@ -31,144 +44,131 @@ export interface GuildConfig {
   googleDriveRefreshToken: string | undefined;
 }
 
-interface GuildsJsonEntry {
+interface GuildJsonFile {
   name?: string;
-  envFile: string;
+  notionApiKey?: string;
+  notionDatabaseId?: string;
+  googleDriveCredentials?: string;
+  googleDriveRefreshToken?: string;
 }
 
-interface GuildsJson {
-  default?: string;
-  guilds?: Record<string, GuildsJsonEntry>;
+const GUILDS_DIR_DEFAULT = resolvePath(process.cwd(), 'config', 'guilds');
+
+let guildsDir: string = GUILDS_DIR_DEFAULT;
+const cachedJsonByGuildId = new Map<string, GuildJsonFile | null>();
+
+/** テスト用: `config/guilds/` の読込ディレクトリを差し替える。キャッシュもクリア。 */
+export function setGuildsDirForTesting(dir: string | null): void {
+  guildsDir = dir ?? GUILDS_DIR_DEFAULT;
+  cachedJsonByGuildId.clear();
 }
 
-const GUILDS_JSON_PATH_DEFAULT = resolvePath(process.cwd(), 'config', 'guilds.json');
-
-let cachedGuildsJson: GuildsJson | null | undefined; // undefined: 未読込, null: 配置なし
-let guildsJsonPath: string = GUILDS_JSON_PATH_DEFAULT;
-const cachedEnvFiles = new Map<string, Record<string, string>>();
-
-/** テスト用: guilds.json の読込パスを差し替える。キャッシュもクリア。 */
-export function setGuildsJsonPathForTesting(path: string | null): void {
-  guildsJsonPath = path ?? GUILDS_JSON_PATH_DEFAULT;
-  cachedGuildsJson = undefined;
-  cachedEnvFiles.clear();
+function guildJsonPath(guildId: string): string {
+  return resolvePath(guildsDir, `${guildId}.json`);
 }
 
-function loadGuildsJson(): GuildsJson | null {
-  if (cachedGuildsJson !== undefined) return cachedGuildsJson;
-  if (!existsSync(guildsJsonPath)) {
-    cachedGuildsJson = null;
+function loadGuildJson(guildId: string): GuildJsonFile | null {
+  if (cachedJsonByGuildId.has(guildId)) {
+    return cachedJsonByGuildId.get(guildId) ?? null;
+  }
+  const path = guildJsonPath(guildId);
+  if (!existsSync(path)) {
+    cachedJsonByGuildId.set(guildId, null);
     return null;
   }
   try {
-    const raw = readFileSync(guildsJsonPath, 'utf-8');
-    cachedGuildsJson = JSON.parse(raw) as GuildsJson;
-    return cachedGuildsJson;
-  } catch (err) {
-    log.error({ err }, `failed to read ${guildsJsonPath}, falling back to default .env`);
-    cachedGuildsJson = null;
-    return null;
-  }
-}
-
-function loadEnvFile(envFile: string): Record<string, string> {
-  const absPath = isAbsolute(envFile) ? envFile : resolvePath(process.cwd(), envFile);
-  const cached = cachedEnvFiles.get(absPath);
-  if (cached) return cached;
-  if (!existsSync(absPath)) {
-    log.warn(`env file not found: ${absPath}, falling back to default`);
-    cachedEnvFiles.set(absPath, {});
-    return {};
-  }
-  try {
-    const raw = readFileSync(absPath, 'utf-8');
-    const parsed = parseDotenv(raw);
-    cachedEnvFiles.set(absPath, parsed);
+    const raw = readFileSync(path, 'utf-8');
+    const parsed = JSON.parse(raw) as GuildJsonFile;
+    cachedJsonByGuildId.set(guildId, parsed);
     return parsed;
   } catch (err) {
-    log.error({ err }, `failed to parse env file ${absPath}`);
-    cachedEnvFiles.set(absPath, {});
-    return {};
+    log.error(
+      { err },
+      `failed to read ${path}, falling back to default .env for guild ${guildId}`,
+    );
+    cachedJsonByGuildId.set(guildId, null);
+    return null;
   }
 }
 
-function buildConfigFromEnv(
-  guildId: string | null,
-  guildName: string | undefined,
-  overrides: Record<string, string>,
-): GuildConfig {
-  const pick = (key: string): string | undefined => {
-    const v = overrides[key];
-    if (v !== undefined && v.length > 0) return v;
-    const fromProcess = process.env[key];
-    return fromProcess && fromProcess.length > 0 ? fromProcess : undefined;
-  };
-
-  return {
-    guildId,
-    guildName,
-    notionApiKey: pick('NOTION_API_KEY'),
-    notionDatabaseId: pick('NOTION_DATABASE_ID'),
-    googleDriveCredentials: pick('GOOGLE_DRIVE_CREDENTIALS'),
-    googleDriveRefreshToken: pick('GOOGLE_DRIVE_REFRESH_TOKEN'),
-  };
+function pickWithEnv(jsonValue: string | undefined, envKey: string): string | undefined {
+  if (jsonValue !== undefined && jsonValue.length > 0) return jsonValue;
+  const fromEnv = process.env[envKey];
+  return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 }
 
 /**
  * Guild ID から GuildConfig を解決する。
- * - guilds.json が無い / Guild が未登録 / guildId が null → process.env の値を使う（後方互換）
- * - 登録あり → 共通 process.env と Guild 別 env file を merge（Guild 側優先）
+ * - `config/guilds/<guildId>.json` が存在 → 共通 `.env` と merge（Guild 側優先）
+ * - 存在しない / guildId が null → process.env の値だけを返す（後方互換）
  */
 export function loadGuildConfig(guildId: string | null): GuildConfig {
-  const json = loadGuildsJson();
-
-  if (!guildId || !json?.guilds) {
-    return buildConfigFromEnv(guildId, undefined, {});
+  if (!guildId) {
+    return {
+      guildId: null,
+      notionApiKey: pickWithEnv(undefined, 'NOTION_API_KEY'),
+      notionDatabaseId: pickWithEnv(undefined, 'NOTION_DATABASE_ID'),
+      googleDriveCredentials: pickWithEnv(undefined, 'GOOGLE_DRIVE_CREDENTIALS'),
+      googleDriveRefreshToken: pickWithEnv(undefined, 'GOOGLE_DRIVE_REFRESH_TOKEN'),
+    };
   }
 
-  const entry = json.guilds[guildId];
-  if (!entry) {
-    log.info(`guild ${guildId} is not registered in guilds.json, using default .env`);
-    return buildConfigFromEnv(guildId, undefined, {});
+  const json = loadGuildJson(guildId);
+  if (!json) {
+    log.info(`guild ${guildId} has no config/guilds/${guildId}.json, using default .env`);
+    return {
+      guildId,
+      notionApiKey: pickWithEnv(undefined, 'NOTION_API_KEY'),
+      notionDatabaseId: pickWithEnv(undefined, 'NOTION_DATABASE_ID'),
+      googleDriveCredentials: pickWithEnv(undefined, 'GOOGLE_DRIVE_CREDENTIALS'),
+      googleDriveRefreshToken: pickWithEnv(undefined, 'GOOGLE_DRIVE_REFRESH_TOKEN'),
+    };
   }
 
-  const overrides = loadEnvFile(entry.envFile);
   log.info(
-    `guild ${guildId}${entry.name ? ` (${entry.name})` : ''} using env file: ${entry.envFile}`,
+    `guild ${guildId}${json.name ? ` (${json.name})` : ''} using config/guilds/${guildId}.json`,
   );
-  return buildConfigFromEnv(guildId, entry.name, overrides);
+  return {
+    guildId,
+    guildName: json.name,
+    notionApiKey: pickWithEnv(json.notionApiKey, 'NOTION_API_KEY'),
+    notionDatabaseId: pickWithEnv(json.notionDatabaseId, 'NOTION_DATABASE_ID'),
+    googleDriveCredentials: pickWithEnv(json.googleDriveCredentials, 'GOOGLE_DRIVE_CREDENTIALS'),
+    googleDriveRefreshToken: pickWithEnv(json.googleDriveRefreshToken, 'GOOGLE_DRIVE_REFRESH_TOKEN'),
+  };
 }
 
-/** GuildConfig が必要キーをすべて持っているか検査（notion/drive で使う側のヘルパー）。 */
+/** Notion 利用側のヘルパー: 必要キーが揃ってなければ分かりやすいエラーで落とす。 */
 export function assertNotionConfigured(cfg: GuildConfig): {
   apiKey: string;
   databaseId: string;
 } {
   if (!cfg.notionApiKey) {
     throw new Error(
-      `NOTION_API_KEY が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または .env.guild-<guildId> を確認してください`,
+      `NOTION_API_KEY が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または config/guilds/${cfg.guildId ?? '<guildId>'}.json を確認してください`,
     );
   }
   if (!cfg.notionDatabaseId) {
     throw new Error(
-      `NOTION_DATABASE_ID が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または .env.guild-<guildId> を確認してください`,
+      `NOTION_DATABASE_ID が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または config/guilds/${cfg.guildId ?? '<guildId>'}.json を確認してください`,
     );
   }
   return { apiKey: cfg.notionApiKey, databaseId: cfg.notionDatabaseId };
 }
 
+/** Drive 利用側のヘルパー: 必要キーが揃ってなければ分かりやすいエラーで落とす。 */
 export function assertDriveConfigured(cfg: GuildConfig): {
   credentialsPath: string;
   refreshToken: string;
 } {
   if (!cfg.googleDriveCredentials) {
     throw new Error(
-      `GOOGLE_DRIVE_CREDENTIALS が未設定です（guildId=${cfg.guildId ?? 'default'}）`,
+      `GOOGLE_DRIVE_CREDENTIALS が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または config/guilds/${cfg.guildId ?? '<guildId>'}.json を確認してください`,
     );
   }
   if (!cfg.googleDriveRefreshToken) {
     throw new Error(
-      `GOOGLE_DRIVE_REFRESH_TOKEN が未設定です（guildId=${cfg.guildId ?? 'default'}）`,
+      `GOOGLE_DRIVE_REFRESH_TOKEN が未設定です（guildId=${cfg.guildId ?? 'default'}）。.env または config/guilds/${cfg.guildId ?? '<guildId>'}.json を確認してください`,
     );
   }
   return {

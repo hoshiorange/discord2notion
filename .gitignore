@@ -9,15 +9,14 @@ dist/
 
 # 環境変数(機密情報)
 .env
-# AIP-38: Guild 別の env / OAuth 認証情報（Guild 別 Notion / Google アカウント運用用）
-.env.guild-*
-credentials.guild-*.json
 
 # Google OAuth credentials(機密情報)
 credentials.json
 token.json
+# Guild 別の OAuth credentials（マルチ Guild 運用時、機密情報）
+credentials.guild-*.json
 
-# AIP-38: マルチ Guild 設定（Guild ID マッピング、機密扱い）
+# マルチ Guild 設定（config/guilds/<guildId>.json は機密情報を含むためディレクトリごと無視）
 config/
 
 # 音声ファイル(個人情報)

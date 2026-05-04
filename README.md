@@ -302,6 +302,9 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 **任意（チューニング）**
 - `DISCORD_GUILD_ID` — Guild 限定でコマンド即時反映
 - `RECORDING_MAX_MINUTES` — 録音上限分（既定 480）
+
+複数の Discord サーバで運用し **サーバごとに別 Notion DB / 別 Google アカウント** に振り分けたい場合は [`docs/MULTI_GUILD.md`](./docs/MULTI_GUILD.md) を参照（任意・1 サーバ運用なら不要）。
+
 - `RECORDINGS_RETAIN_DAYS` — 完了済みセッションの保持日数。これより古いものは起動時 / 24h 周期で自動削除（既定 30）
 - `TRANSCRIBE_TIMEOUT_MS` — Whisper タイムアウト（既定 600000）
 - `SUMMARIZE_TIMEOUT_MS` — Claude 要約タイムアウト（既定 600000）
