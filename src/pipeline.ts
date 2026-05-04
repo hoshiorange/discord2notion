@@ -286,7 +286,12 @@ export async function runPostMp3Pipeline(
         basename(state.transcript.transcriptPath),
         basename(state.summary.summaryPath),
       ],
-      { guildConfig, guildId: state.guildId },
+      {
+        guildConfig,
+        guildId: state.guildId,
+        // AIP-38: config/guilds/<guildId>.json の name を Drive フォルダ名にも反映
+        guildName: guildConfig.guildName,
+      },
     );
     state.drive = r;
   });

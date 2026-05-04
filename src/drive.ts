@@ -1,9 +1,12 @@
 /**
  * Google Drive へセッション成果物をアップロードする。
  *
- * フォルダ階層: meetingBot/<guildId or "default">/<YYYY-MM>/<sessionId>/
- *   - AIP-38: マルチ Guild 運用で Guild ごとに出力先が分かれるよう、
- *     `<guildId>` 層を挿入。guildId 未指定・null・空文字のときは "default" にフォールバック。
+ * フォルダ階層: meetingBot/<guildFolderName>/<YYYY-MM>/<sessionId>/
+ *   - AIP-38: マルチ Guild 運用で Guild ごとに出力先が分かれるよう `<guildFolderName>` 層を挿入。
+ *   - `<guildFolderName>` は `resolveGuildFolderName(name, guildId)` の結果:
+ *       - `config/guilds/<guildId>.json` の `name` が安全文字のみ → `<name>-<guildId>`
+ *       - name 未指定 / 空 / 危険文字含み                          → `<guildId>` のみ（warn ログ）
+ *       - `guildId` 未指定 / 空                                   → `"default"`
  *
  * 認証: .env の GOOGLE_DRIVE_CREDENTIALS（credentials.json パス）と
  *        GOOGLE_DRIVE_REFRESH_TOKEN を使った OAuth2 リフレッシュフロー。
@@ -227,13 +230,55 @@ export interface UploadOptions {
    * 階層は `meetingBot/<guildId or "default">/<YYYY-MM>/<sessionId>/` になる。
    */
   guildId?: string | null;
+  /**
+   * AIP-38: フォルダ名に付与する人間可読ラベル（`config/guilds/<guildId>.json` の `name`）。
+   * 安全文字のみで構成されていれば `<name>-<guildId>` のフォルダ名になる。NG 文字含み・空・未指定なら
+   * `<guildId>` のみにフォールバック（warn ログ付き）。
+   */
+  guildName?: string;
 }
 
 const DEFAULT_GUILD_FOLDER = 'default';
 
-function guildFolderName(guildId: string | null | undefined): string {
-  if (!guildId || guildId.trim().length === 0) return DEFAULT_GUILD_FOLDER;
-  return guildId;
+/**
+ * AIP-38: フォルダ名に許可する文字（Unicode カテゴリで判定）。
+ *  - `\p{L}`:   アルファベット系（日本語・漢字・ひらがな・カタカナ含む全文字）
+ *  - `\p{N}`:   数字系
+ *  - ` `:       半角スペース
+ *  - `　`:  全角スペース
+ *  - `-` `_`:   ハイフン・アンダースコア
+ *
+ * NG 文字（含まれていたらフォールバック）:
+ *  - パス区切り `/`, `\`
+ *  - Windows 予約 `: * ? " < > |`
+ *  - 制御文字 `\n`, `\t`, `\r` 等（`\s` 一括ではなく実空白だけ許可することで除外）
+ *  - 絵文字（記号扱いなので `\p{L}\p{N}` どちらにも該当しない）
+ */
+const SAFE_NAME_PATTERN = /^[\p{L}\p{N} 　\-_]+$/u;
+
+/**
+ * AIP-38: Guild フォルダ名を解決する。
+ *  - `name` が安全文字のみ → `<name>-<guildId>` を返す
+ *  - `name` が未指定 / 空 / NG 文字含み → `<guildId>` のみ（NG の場合は warn ログ）
+ *  - `guildId` 未指定 / 空 → `"default"` にフォールバック（AIP-38 既存挙動）
+ *
+ * 純関数として export してテストから直接呼び出せるようにしておく。
+ */
+export function resolveGuildFolderName(
+  name: string | undefined,
+  guildId: string | null | undefined,
+): string {
+  const id = guildId && guildId.trim().length > 0 ? guildId : DEFAULT_GUILD_FOLDER;
+  if (!name) return id;
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return id;
+  if (!SAFE_NAME_PATTERN.test(trimmed)) {
+    log.warn(
+      `Drive folder name fallback: name="${name}" に使用できない文字が含まれるため "${id}" のみを使用します`,
+    );
+    return id;
+  }
+  return `${trimmed}-${id}`;
 }
 
 /**
@@ -272,7 +317,7 @@ export async function uploadSession(
 
   try {
     const rootId = await ensureFolder(drive, ROOT_FOLDER_NAME, null);
-    const guildFolder = guildFolderName(options.guildId);
+    const guildFolder = resolveGuildFolderName(options.guildName, options.guildId);
     const guildFolderId = await ensureFolder(drive, guildFolder, rootId);
     const monthId = await ensureFolder(drive, monthFolderName(new Date()), guildFolderId);
     const sessionFolderId = await ensureFolder(drive, sessionId, monthId);
