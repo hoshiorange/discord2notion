@@ -29,10 +29,18 @@ const FRAME_SIZE = 960; // 20ms @ 48kHz
 
 const MAX_OPUS_PACKET_SIZE = 4000; // 安全マージン込み
 
+export interface UserWavFile {
+  userId: string;
+  /** ユーザー別 WAV (s16le 48kHz stereo) のフルパス。話者識別用に Whisper にかけられる。 */
+  wavPath: string;
+}
+
 export interface ProcessSessionResult {
   mixedMp3: string | null;
   durationSec: number;
   inputCount: number;
+  /** ユーザー別 WAV ファイル一覧（AIP-37 話者識別用）。デコード成功した分のみ含まれる。 */
+  userWavs: UserWavFile[];
 }
 
 /**
@@ -85,6 +93,25 @@ async function decodeOpusrawToPcmFile(opusrawPath: string, pcmPath: string): Pro
   await writeDone;
 }
 
+async function runFfmpeg(args: string[]): Promise<void> {
+  log.info(`ffmpeg ${args.join(' ')}`);
+  const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  proc.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    proc.on('exit', (code) => resolve(code ?? -1));
+    proc.on('error', reject);
+  });
+
+  if (exitCode !== 0) {
+    const tail = stderr.slice(-1000);
+    throw new Error(`ffmpeg exited with code ${exitCode}\n${tail}`);
+  }
+}
+
 /** 複数の PCM (s16le) を amix でミックスし MP3 出力。1入力なら直接エンコード。 */
 async function mixPcmToMp3(pcmPaths: string[], outputMp3: string): Promise<void> {
   if (pcmPaths.length === 0) {
@@ -103,27 +130,32 @@ async function mixPcmToMp3(pcmPaths: string[], outputMp3: string): Promise<void>
   }
   args.push('-c:a', 'libmp3lame', '-q:a', '2', '-y', outputMp3);
 
-  log.info(`ffmpeg ${args.join(' ')}`);
+  await runFfmpeg(args);
+}
 
-  const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stderr = '';
-  proc.stderr?.on('data', (chunk: Buffer) => {
-    stderr += chunk.toString();
-  });
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    proc.on('exit', (code) => resolve(code ?? -1));
-    proc.on('error', reject);
-  });
-
-  if (exitCode !== 0) {
-    const tail = stderr.slice(-1000);
-    throw new Error(`ffmpeg exited with code ${exitCode}\n${tail}`);
-  }
+/** 単一の生 PCM (s16le) を WAV ヘッダ付きでラップして出力（Whisper が直接読める形式）。 */
+async function pcmToWav(pcmPath: string, wavPath: string): Promise<void> {
+  const args = [
+    '-f',
+    's16le',
+    '-ar',
+    String(SAMPLE_RATE),
+    '-ac',
+    String(CHANNELS),
+    '-i',
+    pcmPath,
+    '-c:a',
+    'pcm_s16le',
+    '-y',
+    wavPath,
+  ];
+  await runFfmpeg(args);
 }
 
 /**
- * セッションの全 .opusraw を変換しミックスして mixed.mp3 を生成する。中間 .pcm は削除。
+ * セッションの全 .opusraw を変換しミックスして mixed.mp3 を生成する。
+ * AIP-37: ユーザー別 WAV (`<userId>.wav`) も同時生成し話者識別 transcribe に使えるようにする。
+ * 中間 .pcm は削除。WAV は残す（呼び出し側でアーカイブまたは削除を判断）。
  */
 export async function processSession(
   sessionDir: string,
@@ -132,29 +164,48 @@ export async function processSession(
   const start = Date.now();
 
   if (opusrawFiles.length === 0) {
-    return { mixedMp3: null, durationSec: 0, inputCount: 0 };
+    return { mixedMp3: null, durationSec: 0, inputCount: 0, userWavs: [] };
   }
 
-  const pcmPaths: string[] = [];
+  const decoded: { userId: string; pcmPath: string }[] = [];
   for (const f of opusrawFiles) {
     const pcm = joinPath(sessionDir, `${f.userId}.pcm`);
     log.info(`decoding ${basename(f.filename)} → ${basename(pcm)}`);
     try {
       await decodeOpusrawToPcmFile(f.filename, pcm);
-      pcmPaths.push(pcm);
+      decoded.push({ userId: f.userId, pcmPath: pcm });
     } catch (err) {
       log.error({ err, file: f.filename }, 'decode failed');
       // このユーザーはスキップして他は処理
     }
   }
 
-  if (pcmPaths.length === 0) {
-    return { mixedMp3: null, durationSec: (Date.now() - start) / 1000, inputCount: 0 };
+  if (decoded.length === 0) {
+    return {
+      mixedMp3: null,
+      durationSec: (Date.now() - start) / 1000,
+      inputCount: 0,
+      userWavs: [],
+    };
   }
 
+  const pcmPaths = decoded.map((d) => d.pcmPath);
   const mixedMp3 = joinPath(sessionDir, 'mixed.mp3');
   log.info(`mixing ${pcmPaths.length} PCM(s) → ${basename(mixedMp3)}`);
   await mixPcmToMp3(pcmPaths, mixedMp3);
+
+  // ユーザー別 WAV 生成（話者識別 transcribe 用）
+  const userWavs: UserWavFile[] = [];
+  for (const d of decoded) {
+    const wavPath = joinPath(sessionDir, `${d.userId}.wav`);
+    log.info(`pcm → wav: ${basename(d.pcmPath)} → ${basename(wavPath)}`);
+    try {
+      await pcmToWav(d.pcmPath, wavPath);
+      userWavs.push({ userId: d.userId, wavPath });
+    } catch (err) {
+      log.error({ err, userId: d.userId }, 'pcm → wav failed');
+    }
+  }
 
   // 中間 PCM 削除
   for (const pcm of pcmPaths) {
@@ -169,5 +220,6 @@ export async function processSession(
     mixedMp3,
     durationSec: (Date.now() - start) / 1000,
     inputCount: pcmPaths.length,
+    userWavs,
   };
 }
