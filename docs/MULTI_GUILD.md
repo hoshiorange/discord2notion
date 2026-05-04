@@ -24,6 +24,26 @@ config/
 
 ---
 
+## 起動時に `.env` で必須なもの
+
+`npm start` 時の起動チェックで **必須なのは `DISCORD_TOKEN` だけ** です。
+
+| 値 | 起動時必須？ | 配置可能な場所 |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | **必須** | `.env` のみ（Bot 共通） |
+| `NOTION_API_KEY` / `NOTION_DATABASE_ID` | 任意 | `.env` または `config/guilds/<guildId>.json` |
+| `GOOGLE_DRIVE_CREDENTIALS` / `GOOGLE_DRIVE_REFRESH_TOKEN` | 任意 | `.env` または `config/guilds/<guildId>.json` |
+
+Notion / Drive 関連は **どちらか一方にあれば OK**。
+両方とも空のまま該当 Guild から `/start` すると、パイプラインの該当ステージ
+（Drive アップロード or Notion ページ作成）で「`NOTION_API_KEY` が未設定です」等の
+エラーになり、`pipeline-state.json` に失敗が記録される（Bot 自体は止まらず、`/resume` で再開可能）。
+
+> マルチ Guild 運用で **すべての Notion / Drive 設定を Guild 別 JSON に寄せた** 結果、
+> `.env` から `NOTION_*` / `GOOGLE_DRIVE_*` を削除しても起動は通ります。
+
+---
+
 ## ファイル形式
 
 ### 配置場所
