@@ -17,13 +17,10 @@ const pipelineLog = getLogger('pipeline');
 
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-const REQUIRED_ENV_VARS = [
-  'DISCORD_TOKEN',
-  'NOTION_API_KEY',
-  'NOTION_DATABASE_ID',
-  'GOOGLE_DRIVE_CREDENTIALS',
-  'GOOGLE_DRIVE_REFRESH_TOKEN',
-] as const;
+// AIP-38: Bot 起動時に .env 必須なのは DISCORD_TOKEN のみ。
+// Notion / Drive 関連は config/guilds/<guildId>.json で上書きできるため、
+// .env 直読みでの early validation には含めない（loadGuildConfig 利用箇所で都度チェック）。
+const REQUIRED_ENV_VARS = ['DISCORD_TOKEN'] as const;
 
 const missingEnv = REQUIRED_ENV_VARS.filter((k) => {
   const v = process.env[k];
@@ -196,8 +193,16 @@ async function backgroundConvert(
   leaveResult: VoiceLeaveResult,
   reason: ConvertReason,
 ): Promise<void> {
-  const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt, channelName } =
-    leaveResult;
+  const {
+    sessionDir,
+    textChannelId,
+    files,
+    sessionId,
+    durationMs,
+    startedAt,
+    channelName,
+    guildId,
+  } = leaveResult;
   if (!sessionDir) return;
   const tag =
     reason === 'timeout'
@@ -260,6 +265,7 @@ async function backgroundConvert(
     mixedMp3Path: mixedMp3,
     channelName,
     textChannelId,
+    guildId,
     files,
     participants,
     userWavs,

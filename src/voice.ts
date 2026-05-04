@@ -77,6 +77,8 @@ export interface VoiceLeaveResult {
   sessionId: string | null;
   sessionDir: string | null;
   textChannelId: string | null;
+  /** AIP-38: 録音中だった Guild の ID（auto-leave / timeout 経路で pipeline に渡すため） */
+  guildId: string | null;
   files: { userId: string; filename: string }[];
 }
 
@@ -387,6 +389,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     const sessionId = this.sessionId;
     const sessionDir = this.sessionDir;
     const textChannelId = this.textChannelId;
+    const guildId = this.guildId;
 
     const files: { userId: string; filename: string }[] = [];
     for (const [userId, entry] of this.userFiles) {
@@ -402,7 +405,17 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
 
     this.cleanup();
 
-    return { stats, durationMs, startedAt, channelName, sessionId, sessionDir, textChannelId, files };
+    return {
+      stats,
+      durationMs,
+      startedAt,
+      channelName,
+      sessionId,
+      sessionDir,
+      textChannelId,
+      guildId,
+      files,
+    };
   }
 
   private cleanup(): void {

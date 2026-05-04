@@ -4,6 +4,10 @@
  * クリーンな前提を作るため、毎回ユニークな疑似セッションディレクトリ
  * (recordings/aip35-<timestamp>) を一時生成して検証する。
  *
+ * AIP-38 追従: 階層に Guild ID 層が入ったため、本番出力先（meetingBot/<実 guildId>/...）
+ * を汚さないよう `guildId: "test_dedup"` を渡し、`meetingBot/test_dedup/<YYYY-MM>/<sessionId>/`
+ * に書き出す。検証後はそのセッションフォルダごとゴミ箱送りにする。
+ *
  * 期待挙動:
  *   1回目 → create（新規作成）。フォルダ内に各ファイルが1個ずつ。
  *   2回目 → update（同 fileId に上書き）。ファイル数は変わらず1個ずつ。
@@ -18,6 +22,12 @@ import { uploadSession } from '../src/drive.js';
 
 const sourceSession = 'recordings/2026-05-03_211934_ovek5e';
 const filenames = ['mixed.mp3', 'transcript.json'];
+
+/**
+ * AIP-38: 本番運用の Guild ID（数値文字列）と被らない、テスト専用フォルダ名。
+ * Drive 階層は `meetingBot/<TEST_GUILD_ID>/<YYYY-MM>/<sessionId>/` に書き出される。
+ */
+const TEST_GUILD_ID = 'test_dedup';
 
 interface OAuthClientSecret {
   installed?: { client_id?: string; client_secret?: string };
@@ -83,7 +93,7 @@ async function main(): Promise<void> {
 
   try {
     console.log('--- 1回目（create 期待） ---');
-    const r1 = await uploadSession(`recordings/${stamp}`, filenames);
+    const r1 = await uploadSession(`recordings/${stamp}`, filenames, { guildId: TEST_GUILD_ID });
     console.log(`folderUrl: ${r1.folderUrl}`);
     folderId = folderIdFromUrl(r1.folderUrl);
 
@@ -93,7 +103,7 @@ async function main(): Promise<void> {
 
     console.log();
     console.log('--- 2回目（update 期待） ---');
-    const r2 = await uploadSession(`recordings/${stamp}`, filenames);
+    const r2 = await uploadSession(`recordings/${stamp}`, filenames, { guildId: TEST_GUILD_ID });
     console.log(`folderUrl: ${r2.folderUrl}`);
 
     const after2 = await listFolderFiles(folderId);
@@ -119,7 +129,10 @@ async function main(): Promise<void> {
     // force=true で新規作成されることも確認
     console.log();
     console.log('--- 3回目（force=true で新規作成期待） ---');
-    const r3 = await uploadSession(`recordings/${stamp}`, filenames, { force: true });
+    const r3 = await uploadSession(`recordings/${stamp}`, filenames, {
+      force: true,
+      guildId: TEST_GUILD_ID,
+    });
     const after3 = await listFolderFiles(folderId);
     console.log(`[after 3回目] files=${after3.length}`);
     for (const fname of filenames) {

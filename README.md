@@ -12,17 +12,27 @@ Discord ボイスチャンネルでの会議を **録音 → 文字起こし →
 /stop（または VC 全員退出 / 8時間タイムアウト）
    ↓
    1. ユーザー別音声を MP3 にミックス
-   2. Whisper で日本語文字起こし
+   2. Whisper で日本語文字起こし（ユーザー別に話者識別）
    3. Claude Code で議事録要約
    4. 音声・文字起こし・要約を Google Drive にアップロード
-   5. Notion 議事録 DB に新規ページ作成
+   5. Notion 議事録 DB に新規ページ作成（末尾に発言時間サマリを自動挿入）
    ↓
 Discord に完了通知（Drive / Notion へのリンク付き）
 ```
 
 すべて自動。会議が終わったら数分後には Notion に議事録ページができている。
 
+### 話者識別
+
+ユーザー別の `.opusraw` をそれぞれ Whisper にかけて発話タイムラインをマージするため、**誰がいつ何を話したか**まで識別される。Notion ページ末尾には参加者ごとの**発言時間サマリ**が自動で挿入される。
+
 途中ステージ（要約 / Drive / Notion 等）が一時的に失敗しても `pipeline-state.json` に状態が永続化されるため、`/resume` で続きから再開できる。詳細は [スラッシュコマンド](#スラッシュコマンド) を参照。
+
+### 同時録音は 1 セッションのみ
+
+1 つの Bot プロセスで同時に録音できるのは **1 サーバ × 1 ボイスチャンネル** だけ。録音中に別サーバ / 別 VC で `/start` を打つと、既存セッションは保護されたまま **2 つ目はエラー（録音中の guild / channel / 経過時間を表示）で弾かれる**。
+
+複数サーバで同時に議事録を録音したい場合は、各サーバの管理者がそれぞれ **自分の Bot Application を Discord Developer Portal で作成し、自分の PC で別プロセスとして起動**する運用が標準（Bot Token は Bot Application ごとに別。同じ Token で複数プロセスは動かない）。
 
 ## 必要な環境
 
@@ -198,13 +208,15 @@ src/
 │   ├─ status.ts     # /status: 録音状態表示
 │   └─ resume.ts     # /resume: 失敗パイプラインの再開
 ├─ voice.ts          # VoiceManager: VC 接続・Opus パケット受信・ファイル書き込み・自動再接続
-├─ audio.ts          # processSession: .opusraw → PCM → MP3 ミックス（FFmpeg）
+├─ audio.ts          # processSession: .opusraw → PCM → MP3 ミックス（FFmpeg）+ ユーザー別 WAV 生成
 ├─ transcribe.ts     # Whisper CLI ラッパー（Python 子プロセス）
 ├─ summarize.ts      # Claude Code ヘッドレスで議事録要約
-├─ drive.ts          # Google Drive アップロード
-├─ notion.ts         # Notion 議事録ページ生成
+├─ drive.ts          # Google Drive アップロード（同名ファイル上書き対応 / Guild 別フォルダ階層）
+├─ notion.ts         # Notion 議事録ページ生成（話者別発言時間サマリ含む）
 ├─ pipeline.ts       # 文字起こし→要約→Drive→Notion を順次実行＋ pipeline-state.json 永続化
-└─ cleanup.ts        # 古い完了済みセッションの自動クリーンアップ（起動時 + 24h 間隔）
+├─ cleanup.ts        # 古い完了済みセッションの自動クリーンアップ（起動時 + 24h 間隔）
+├─ logger.ts         # pino ベースのロガー（日次ローテート + 自動削除）
+└─ config.ts         # Guild 別の Notion / Drive 認証情報を解決（config/guilds/<guildId>.json）
 
 scripts/
 ├─ transcribe.py     # Faster-Whisper CLI（音声 → JSON）。setup_cuda_paths() で Windows DLL 問題に対応
@@ -218,7 +230,14 @@ scripts/
 ├─ test_summarize.ts         # summarize.ts 単体検証
 ├─ test_drive_upload.ts      # drive.ts 単体検証
 ├─ test_notion_page.ts       # notion.ts 単体検証
-└─ test_cleanup.ts           # cleanup.ts 単体検証
+├─ test_cleanup.ts           # cleanup.ts 単体検証
+├─ test_logger.ts            # logger.ts 単体検証
+├─ test_voice_reconnect.ts   # Voice 自動再接続シナリオ検証
+├─ test_speaker.ts           # 話者識別パイプライン検証
+├─ test_stop_flow.ts         # /stop 経路の再現テスト
+├─ test_drive_dedup.ts       # Drive 同名ファイル上書き検証
+├─ test_multiguild_config.ts # Guild 別 JSON ローダー検証
+└─ test_guild_folder_name.ts # resolveGuildFolderName 純関数検証
 
 recordings/<sessionId>/      # 録音セッションごとのファイル（gitignore 対象）
 ├─ <userId>.opusraw   # ユーザー別 Opus パケット（独自フォーマット: 4byte length + payload）
@@ -275,12 +294,11 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 - ログで `[pipeline] notion page failed:` を検索 → エラー内容を確認
 - `/resume` で再開可能
 
-### Drive 同名ファイルの重複（既知問題）
+### Drive 同名ファイルの重複
 
-- 原因: 同じセッションフォルダに同名アップロードを繰り返すと、Drive 側で別 fileId として並んで作られる
-- 通常運用ではセッションごとに sessionId フォルダが分かれるため発生しない
-- `/resume` で Drive ステージを再実行すると稀に発生する。AIP-35 で恒久対応予定
-- 暫定対応: 古いほうを手動削除
+- 同じセッションフォルダ内に同名ファイルが既にあれば `files.update` で上書きされるため、`/resume` で Drive ステージを再実行しても重複しない
+- 通常運用でもセッションごとに sessionId フォルダが分かれるため、別セッション間でも衝突しない
+- `force: true` を指定した場合のみ常に新規作成となる（通常パスでは未使用）
 
 ### `.env` のシークレットが正しいのに認証エラー
 
@@ -292,12 +310,18 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 `.env.example` 参照。主要なもの：
 
-**必須**
-- `DISCORD_TOKEN`
-- `NOTION_API_KEY`
-- `NOTION_DATABASE_ID`
-- `GOOGLE_DRIVE_CREDENTIALS`
-- `GOOGLE_DRIVE_REFRESH_TOKEN`
+**起動時必須**
+- `DISCORD_TOKEN` — Bot 起動チェックでこれだけが必須
+
+**Notion / Drive 関連（`.env` または `config/guilds/<guildId>.json` のいずれかに必要）**
+- `NOTION_API_KEY` / `NOTION_DATABASE_ID`
+- `GOOGLE_DRIVE_CREDENTIALS` / `GOOGLE_DRIVE_REFRESH_TOKEN`
+
+これらは Bot 起動自体には不要だが、`/stop` 後のパイプライン（Drive アップロード / Notion ページ作成）で参照される。`.env` か Guild 別 JSON のどちらか一方に書かれていれば OK。両方とも空のまま `/start` すると該当ステージで失敗し、`pipeline-state.json` に記録された上で `/resume` 可能。
+
+> **取得方法は [`docs/SETUP_EXTERNAL.md`](./docs/SETUP_EXTERNAL.md) を参照**（Discord Bot Token / Notion Integration & DB ID / Google Drive OAuth credentials & refresh token / Claude Code CLI セットアップを 1 ファイルに集約）。
+
+複数の Discord サーバで運用し **サーバごとに別 Notion DB / 別 Google アカウント** に振り分けたい場合は [`docs/MULTI_GUILD.md`](./docs/MULTI_GUILD.md) を参照（任意・1 サーバ運用なら `.env` 一本で OK）。
 
 **任意（チューニング）**
 - `DISCORD_GUILD_ID` — Guild 限定でコマンド即時反映
@@ -307,6 +331,14 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 - `SUMMARIZE_TIMEOUT_MS` — Claude 要約タイムアウト（既定 600000）
 - `PYTHON_BIN` — Python 実行ファイル指定（既定 `.venv/Scripts/python.exe` 自動検出）
 - `CLAUDE_BIN` — claude CLI 指定（既定 `claude`）
+
+**ログ運用**
+- `LOG_DIR` — ログ出力ディレクトリ（既定 `logs`）
+- `LOG_LEVEL` — `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`（既定 `info`）
+- `LOG_RETAIN_DAYS` — 古いログファイルの保持日数。これより古い `<LOG_DIR>/*.log` は起動時 + 24h 周期で自動削除（既定 14）
+- `NODE_ENV` — `production` を指定すると pino-pretty が無効化され JSON 形式のファイル出力のみになる。それ以外は stdout に整形 + ファイル両方
+
+ログは `logs/<YYYY-MM-DD>.log` に日次ローテートされ、`LOG_RETAIN_DAYS` 経過分は自動削除される。
 
 ## License & Contributions
 

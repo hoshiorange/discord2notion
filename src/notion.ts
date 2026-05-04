@@ -11,14 +11,12 @@
 
 import { Client } from '@notionhq/client';
 
+import { assertNotionConfigured, loadGuildConfig, type GuildConfig } from './config.js';
 import { getLogger } from './logger.js';
 import type { SummaryResult } from './summarize.js';
 import type { TranscribeSegment } from './transcribe.js';
 
 const log = getLogger('notion');
-
-const NOTION_API_KEY = process.env.NOTION_API_KEY;
-const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 
 const VALID_TAGS = new Set(['定例', '顧客MTG', 'プロジェクト', '1on1', 'その他']);
 const DEFAULT_STATUS = '完了';
@@ -38,17 +36,15 @@ export interface CreateMeetingPageArgs {
    * フル文字起こしは Drive 上の transcript.json を参照する設計（Notion ブロック制限を回避）。
    */
   transcriptSegments?: TranscribeSegment[];
+  /**
+   * AIP-38: Guild 別の認証情報を渡す。未指定なら process.env から解決（後方互換）。
+   */
+  guildConfig?: GuildConfig;
 }
 
 export interface CreateMeetingPageResult {
   pageUrl: string;
   pageId: string;
-}
-
-function requireEnv(): { apiKey: string; databaseId: string } {
-  if (!NOTION_API_KEY) throw new Error('NOTION_API_KEY が .env に設定されていません');
-  if (!NOTION_DATABASE_ID) throw new Error('NOTION_DATABASE_ID が .env に設定されていません');
-  return { apiKey: NOTION_API_KEY, databaseId: NOTION_DATABASE_ID };
 }
 
 function pad(n: number): string {
@@ -305,7 +301,8 @@ function buildProperties(args: CreateMeetingPageArgs): Record<string, unknown> {
 export async function createMeetingPage(
   args: CreateMeetingPageArgs,
 ): Promise<CreateMeetingPageResult> {
-  const { apiKey, databaseId } = requireEnv();
+  const cfg = args.guildConfig ?? loadGuildConfig(null);
+  const { apiKey, databaseId } = assertNotionConfigured(cfg);
   const client = new Client({ auth: apiKey });
 
   const properties = buildProperties(args);
