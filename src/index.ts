@@ -109,7 +109,7 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   }
 });
 
-type ConvertReason = 'auto-leave' | 'timeout';
+type ConvertReason = 'auto-leave' | 'timeout' | 'reconnect-failed';
 
 async function fetchParticipantNames(userIds: string[]): Promise<string[]> {
   const names: string[] = [];
@@ -133,8 +133,18 @@ async function backgroundConvert(
   const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt, channelName } =
     leaveResult;
   if (!sessionDir) return;
-  const tag = reason === 'timeout' ? '[timeout]' : '[auto-leave]';
-  const notifyPrefix = reason === 'timeout' ? '⏰ 録音時間上限に到達したので自動停止' : '🎵 自動退出';
+  const tag =
+    reason === 'timeout'
+      ? '[timeout]'
+      : reason === 'reconnect-failed'
+        ? '[reconnect-failed]'
+        : '[auto-leave]';
+  const notifyPrefix =
+    reason === 'timeout'
+      ? '⏰ 録音時間上限に到達したので自動停止'
+      : reason === 'reconnect-failed'
+        ? '⚠️ Voice 接続が回復しなかったので録音停止'
+        : '🎵 自動退出';
 
   let notifyChannel: { send: (content: string) => Promise<unknown> } | null = null;
   if (textChannelId) {
@@ -214,6 +224,11 @@ async function backgroundConvert(
 // 録音時間上限到達時に発火
 voiceManager.on('timeout', (leaveResult) => {
   void backgroundConvert(leaveResult, 'timeout');
+});
+
+// Voice 再接続が完全に失敗した時に発火
+voiceManager.on('reconnect_failed', (leaveResult) => {
+  void backgroundConvert(leaveResult, 'reconnect-failed');
 });
 
 client.on(Events.Error, (err) => {

@@ -79,6 +79,27 @@ export interface VoiceLeaveResult {
 
 interface VoiceManagerEvents {
   timeout: [VoiceLeaveResult];
+  reconnect_failed: [VoiceLeaveResult];
+}
+
+// Phase 1: discord.js v14 の自動再接続を待つ時間
+const AUTO_RECOVERY_TRANSITION_TIMEOUT_MS = 5_000;
+const AUTO_RECOVERY_READY_TIMEOUT_MS = 30_000;
+// Phase 2: 手動 rejoin 後に Ready を待つ時間
+const MANUAL_RECONNECT_READY_TIMEOUT_MS = 20_000;
+
+function getReconnectMaxAttempts(): number {
+  const raw = process.env.VOICE_RECONNECT_MAX_ATTEMPTS;
+  if (!raw) return 3;
+  const v = Number.parseInt(raw, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 3;
+}
+
+function getReconnectBackoffMs(): number {
+  const raw = process.env.VOICE_RECONNECT_BACKOFF_MS;
+  if (!raw) return 2000;
+  const v = Number.parseInt(raw, 10);
+  return Number.isFinite(v) && v > 0 ? v : 2000;
 }
 
 class VoiceManager extends EventEmitter<VoiceManagerEvents> {
@@ -94,6 +115,8 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
   private userStats = new Map<string, UserStats>();
   private subscribedUsers = new Set<string>();
   private userFiles = new Map<string, UserFile>();
+  private reconnectAttempts = 0;
+  private isHandlingDisconnect = false;
 
   isActive(): boolean {
     return this.connection !== null;
@@ -140,7 +163,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     this.userFiles.clear();
 
     connection.on(VoiceConnectionStatus.Disconnected, () => {
-      console.log('[voice] disconnected');
+      void this.handleDisconnect(connection);
     });
     connection.on('error', (err) => {
       console.error('[voice] connection error:', err);
@@ -193,6 +216,87 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     this.userFiles.set(userId, entry);
     console.log(`[voice] user file opened: ${filename}`);
     return entry;
+  }
+
+  /**
+   * Voice 切断時の再接続戦略（AIP-32）。
+   * Phase 1: discord.js v14 標準の自動再接続を待つ
+   * Phase 2: 失敗したら手動 rejoin() を線形バックオフで N 回試行
+   * Phase 3: それでもダメなら leave + reconnect_failed イベント発火
+   */
+  private async handleDisconnect(connection: VoiceConnection): Promise<void> {
+    if (this.isHandlingDisconnect) return; // 重複発火を防ぐ
+    this.isHandlingDisconnect = true;
+    console.log('[voice] disconnected, checking auto-recovery...');
+    try {
+      if (await this.attemptAutoRecovery(connection)) {
+        this.reconnectAttempts = 0;
+        return;
+      }
+      if (await this.attemptManualReconnect(connection)) {
+        this.reconnectAttempts = 0;
+        return;
+      }
+      console.error(
+        `[voice] reconnect attempts exhausted after ${getReconnectMaxAttempts()} tries, giving up`,
+      );
+      const leaveResult = this.leave();
+      this.emit('reconnect_failed', leaveResult);
+    } finally {
+      this.isHandlingDisconnect = false;
+    }
+  }
+
+  /** Phase 1: discord.js v14 標準の自動再接続を待つ。成功なら true。 */
+  private async attemptAutoRecovery(connection: VoiceConnection): Promise<boolean> {
+    try {
+      await Promise.race([
+        entersState(
+          connection,
+          VoiceConnectionStatus.Signalling,
+          AUTO_RECOVERY_TRANSITION_TIMEOUT_MS,
+        ),
+        entersState(
+          connection,
+          VoiceConnectionStatus.Connecting,
+          AUTO_RECOVERY_TRANSITION_TIMEOUT_MS,
+        ),
+      ]);
+      console.log('[voice] auto-recovering (signalling/connecting)...');
+      await entersState(connection, VoiceConnectionStatus.Ready, AUTO_RECOVERY_READY_TIMEOUT_MS);
+      console.log('[voice] auto-recovery succeeded');
+      return true;
+    } catch {
+      console.log('[voice] auto-recovery failed, attempting manual reconnect');
+      return false;
+    }
+  }
+
+  /** Phase 2: 手動 rejoin を最大 maxAttempts 回、線形バックオフで試行。成功なら true。 */
+  private async attemptManualReconnect(connection: VoiceConnection): Promise<boolean> {
+    const maxAttempts = getReconnectMaxAttempts();
+    const backoffMs = getReconnectBackoffMs();
+    while (this.reconnectAttempts < maxAttempts) {
+      this.reconnectAttempts++;
+      const delay = backoffMs * this.reconnectAttempts;
+      console.log(
+        `[voice] manual reconnect attempt #${this.reconnectAttempts}/${maxAttempts} (wait ${delay}ms)`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      try {
+        connection.rejoin();
+        await entersState(
+          connection,
+          VoiceConnectionStatus.Ready,
+          MANUAL_RECONNECT_READY_TIMEOUT_MS,
+        );
+        console.log(`[voice] manual reconnect #${this.reconnectAttempts} succeeded`);
+        return true;
+      } catch (err) {
+        console.error(`[voice] manual reconnect #${this.reconnectAttempts} failed:`, err);
+      }
+    }
+    return false;
   }
 
   private handleUserStartSpeaking(userId: string): void {
@@ -316,6 +420,8 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     this.sessionDir = null;
     this.userStats.clear();
     this.subscribedUsers.clear();
+    this.reconnectAttempts = 0;
+    this.isHandlingDisconnect = false;
   }
 }
 
