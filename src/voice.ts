@@ -23,6 +23,9 @@ import {
   entersState,
 } from '@discordjs/voice';
 import type { VoiceBasedChannel } from 'discord.js';
+import { getLogger } from './logger.js';
+
+const log = getLogger('voice');
 
 export interface UserStats {
   frameCount: number;
@@ -138,7 +141,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     try {
       mkdirSync(sessionDir, { recursive: true });
     } catch (err) {
-      console.error('[voice] sessionDir 作成失敗:', err);
+      log.error({ err }, 'sessionDir 作成失敗');
       return { success: false, error: '録音ディレクトリ作成失敗' };
     }
 
@@ -166,7 +169,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
       void this.handleDisconnect(connection);
     });
     connection.on('error', (err) => {
-      console.error('[voice] connection error:', err);
+      log.error({ err }, 'connection error');
     });
     connection.receiver.speaking.on('start', (userId) => {
       this.handleUserStartSpeaking(userId);
@@ -174,21 +177,21 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
 
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-      console.log(
-        `[voice] Ready: guild=${channel.guild.id} channel=${channel.id} (${channel.name}) session=${sessionId}`,
+      log.info(
+        `Ready: guild=${channel.guild.id} channel=${channel.id} (${channel.name}) session=${sessionId}`,
       );
     } catch (err) {
-      console.error('[voice] Ready 待機タイムアウト:', err);
+      log.error({ err }, 'Ready 待機タイムアウト');
       this.cleanup();
       return { success: false, error: 'VC 接続が30秒以内に Ready にならなかったので中断しました' };
     }
 
     // 録音時間上限タイマー
     const maxMinutes = getRecordingMaxMinutes();
-    console.log(`[voice] 録音時間上限: ${maxMinutes} 分`);
+    log.info(`録音時間上限: ${maxMinutes} 分`);
     this.timer = setTimeout(
       () => {
-        console.log(`[voice] 録音時間上限 ${maxMinutes} 分に到達、自動停止します`);
+        log.info(`録音時間上限 ${maxMinutes} 分に到達、自動停止します`);
         const leaveResult = this.leave();
         this.emit('timeout', leaveResult);
       },
@@ -209,12 +212,12 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     const filename = joinPath(this.sessionDir, `${userId}.opusraw`);
     const fileStream = createWriteStream(filename);
     fileStream.on('error', (err) => {
-      console.error(`[voice] fileStream error for ${userId}:`, err);
+      log.error({ err, userId }, 'fileStream error');
     });
 
     entry = { fileStream, filename };
     this.userFiles.set(userId, entry);
-    console.log(`[voice] user file opened: ${filename}`);
+    log.info(`user file opened: ${filename}`);
     return entry;
   }
 
@@ -227,7 +230,7 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
   private async handleDisconnect(connection: VoiceConnection): Promise<void> {
     if (this.isHandlingDisconnect) return; // 重複発火を防ぐ
     this.isHandlingDisconnect = true;
-    console.log('[voice] disconnected, checking auto-recovery...');
+    log.info('disconnected, checking auto-recovery...');
     try {
       if (await this.attemptAutoRecovery(connection)) {
         this.reconnectAttempts = 0;
@@ -237,8 +240,8 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
         this.reconnectAttempts = 0;
         return;
       }
-      console.error(
-        `[voice] reconnect attempts exhausted after ${getReconnectMaxAttempts()} tries, giving up`,
+      log.error(
+        `reconnect attempts exhausted after ${getReconnectMaxAttempts()} tries, giving up`,
       );
       const leaveResult = this.leave();
       this.emit('reconnect_failed', leaveResult);
@@ -262,12 +265,12 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
           AUTO_RECOVERY_TRANSITION_TIMEOUT_MS,
         ),
       ]);
-      console.log('[voice] auto-recovering (signalling/connecting)...');
+      log.info('auto-recovering (signalling/connecting)...');
       await entersState(connection, VoiceConnectionStatus.Ready, AUTO_RECOVERY_READY_TIMEOUT_MS);
-      console.log('[voice] auto-recovery succeeded');
+      log.info('auto-recovery succeeded');
       return true;
     } catch {
-      console.log('[voice] auto-recovery failed, attempting manual reconnect');
+      log.info('auto-recovery failed, attempting manual reconnect');
       return false;
     }
   }
@@ -279,8 +282,8 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     while (this.reconnectAttempts < maxAttempts) {
       this.reconnectAttempts++;
       const delay = backoffMs * this.reconnectAttempts;
-      console.log(
-        `[voice] manual reconnect attempt #${this.reconnectAttempts}/${maxAttempts} (wait ${delay}ms)`,
+      log.info(
+        `manual reconnect attempt #${this.reconnectAttempts}/${maxAttempts} (wait ${delay}ms)`,
       );
       await new Promise((r) => setTimeout(r, delay));
       try {
@@ -290,10 +293,10 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
           VoiceConnectionStatus.Ready,
           MANUAL_RECONNECT_READY_TIMEOUT_MS,
         );
-        console.log(`[voice] manual reconnect #${this.reconnectAttempts} succeeded`);
+        log.info(`manual reconnect #${this.reconnectAttempts} succeeded`);
         return true;
       } catch (err) {
-        console.error(`[voice] manual reconnect #${this.reconnectAttempts} failed:`, err);
+        log.error({ err }, `manual reconnect #${this.reconnectAttempts} failed`);
       }
     }
     return false;
@@ -314,13 +317,13 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
     }
     this.subscribedUsers.add(userId);
 
-    console.log(`[voice] start speaking: user=${userId} session=#${stats.speakingSessions}`);
+    log.info(`start speaking: user=${userId} session=#${stats.speakingSessions}`);
 
     let userFile: UserFile;
     try {
       userFile = this.getOrCreateUserFile(userId);
     } catch (err) {
-      console.error('[voice] failed to create user file:', err);
+      log.error({ err }, 'failed to create user file');
       this.subscribedUsers.delete(userId);
       return;
     }
@@ -344,15 +347,15 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
 
     opusStream.on('end', () => {
       this.subscribedUsers.delete(userId);
-      console.log(
-        `[voice] stop speaking : user=${userId} cumulative=${stats.frameCount} frames / ${stats.byteCount} bytes`,
+      log.info(
+        `stop speaking : user=${userId} cumulative=${stats.frameCount} frames / ${stats.byteCount} bytes`,
       );
       // 注意: fileStream は閉じない（次の発話セッションで使い続ける）
     });
 
     opusStream.on('error', (err) => {
       this.subscribedUsers.delete(userId);
-      console.error(`[voice] audio stream error for ${userId}:`, err);
+      log.error({ err, userId }, 'audio stream error');
     });
   }
 
@@ -390,10 +393,10 @@ class VoiceManager extends EventEmitter<VoiceManagerEvents> {
       try {
         entry.fileStream.end();
       } catch (err) {
-        console.error(`[voice] fileStream.end failed for ${userId}:`, err);
+        log.error({ err, userId }, 'fileStream.end failed');
       }
       files.push({ userId, filename: entry.filename });
-      console.log(`[voice] user file closing: ${entry.filename}`);
+      log.info(`user file closing: ${entry.filename}`);
     }
     this.userFiles.clear();
 

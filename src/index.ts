@@ -4,14 +4,22 @@ import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'd
 import { processSession } from './audio.js';
 import { cleanupOldSessions } from './cleanup.js';
 import { commands, commandsByName } from './commands/index.js';
+import { cleanupOldLogs, getLogger } from './logger.js';
 import { runPostMp3Pipeline } from './pipeline.js';
 import { type VoiceLeaveResult, voiceManager } from './voice.js';
+
+const log = getLogger('app');
+const cleanupLog = getLogger('cleanup');
+const logsLog = getLogger('logs');
+const commandLog = getLogger('command');
+const voiceLog = getLogger('voice');
+const pipelineLog = getLogger('pipeline');
 
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
-  console.error('ERROR: DISCORD_TOKEN が .env にありません');
+  log.error('DISCORD_TOKEN が .env にありません');
   process.exit(1);
 }
 
@@ -27,7 +35,7 @@ const client = new Client({
 });
 
 client.once(Events.ClientReady, async (readyClient) => {
-  console.log(`✅ Logged in as ${readyClient.user.tag} (id: ${readyClient.user.id})`);
+  log.info(`✅ Logged in as ${readyClient.user.tag} (id: ${readyClient.user.id})`);
 
   const commandData = commands.map((c) => c.data.toJSON());
   const rest = new REST({ version: '10' }).setToken(token);
@@ -36,27 +44,38 @@ client.once(Events.ClientReady, async (readyClient) => {
       await rest.put(Routes.applicationGuildCommands(readyClient.user.id, guildId), {
         body: commandData,
       });
-      console.log(`✅ ${commands.length} 個のコマンドを Guild ${guildId} に登録（即時反映）`);
+      log.info(`✅ ${commands.length} 個のコマンドを Guild ${guildId} に登録（即時反映）`);
     } else {
       await rest.put(Routes.applicationCommands(readyClient.user.id), { body: commandData });
-      console.log(`✅ ${commands.length} 個のコマンドをグローバル登録（反映に最大1時間）`);
+      log.info(`✅ ${commands.length} 個のコマンドをグローバル登録（反映に最大1時間）`);
     }
   } catch (err) {
-    console.error('スラッシュコマンド登録失敗:', err);
+    log.error({ err }, 'スラッシュコマンド登録失敗');
   }
 
-  void runCleanup();
+  void runSessionCleanup();
+  void runLogCleanup();
   setInterval(() => {
-    void runCleanup();
+    void runSessionCleanup();
+    void runLogCleanup();
   }, CLEANUP_INTERVAL_MS);
 });
 
-async function runCleanup(): Promise<void> {
+async function runSessionCleanup(): Promise<void> {
   try {
     const r = await cleanupOldSessions();
-    console.log(`[cleanup] deleted=${r.deleted.length} kept=${r.kept.length}`);
+    cleanupLog.info(`deleted=${r.deleted.length} kept=${r.kept.length}`);
   } catch (err) {
-    console.error('[cleanup] error:', err);
+    cleanupLog.error({ err }, 'session cleanup error');
+  }
+}
+
+async function runLogCleanup(): Promise<void> {
+  try {
+    const r = await cleanupOldLogs();
+    logsLog.info(`deleted=${r.deleted.length} kept=${r.kept.length}`);
+  } catch (err) {
+    logsLog.error({ err }, 'log cleanup error');
   }
 }
 
@@ -65,16 +84,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   const command = commandsByName.get(interaction.commandName);
   if (!command) {
-    console.warn(`Unknown command: ${interaction.commandName}`);
+    log.warn(`Unknown command: ${interaction.commandName}`);
     return;
   }
 
-  console.log(`[command] /${interaction.commandName} by ${interaction.user.tag}`);
+  commandLog.info(`/${interaction.commandName} by ${interaction.user.tag}`);
 
   try {
     await command.execute(interaction);
   } catch (err) {
-    console.error(`Error in /${interaction.commandName}:`, err);
+    log.error({ err }, `Error in /${interaction.commandName}`);
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp({
         content: '⚠️ コマンド実行中にエラーが発生しました',
@@ -103,7 +122,7 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
 
   // Bot 自身が外部要因（kick / move）で VC から外された場合は内部状態を片付ける
   if (oldState.id === botUserId) {
-    console.log('[voice] Bot が外部要因で VC から離脱、状態をクリーンアップ');
+    voiceLog.info('Bot が外部要因で VC から離脱、状態をクリーンアップ');
     voiceManager.leave();
     return;
   }
@@ -113,10 +132,10 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   if (!channel) return;
   const humansLeft = channel.members.filter((m) => !m.user.bot).size;
   const memberTag = oldState.member?.user.tag ?? oldState.id;
-  console.log(`[voice] ${memberTag} が ${channel.name} から離脱、残り ${humansLeft} 人`);
+  voiceLog.info(`${memberTag} が ${channel.name} から離脱、残り ${humansLeft} 人`);
 
   if (humansLeft === 0) {
-    console.log('[voice] 全員離脱したので自動退出します');
+    voiceLog.info('全員離脱したので自動退出します');
     const leaveResult = voiceManager.leave();
 
     // ファイルがあれば fire-and-forget で MP3 変換 + 元テキストチャンネルに通知
@@ -136,7 +155,7 @@ async function fetchParticipantNames(userIds: string[]): Promise<string[]> {
       const name = user.displayName || user.username || id;
       names.push(name);
     } catch (err) {
-      console.warn(`[pipeline] failed to fetch user ${id}:`, err);
+      pipelineLog.warn({ err, userId: id }, 'failed to fetch user');
       names.push(id);
     }
   }
@@ -152,10 +171,11 @@ async function backgroundConvert(
   if (!sessionDir) return;
   const tag =
     reason === 'timeout'
-      ? '[timeout]'
+      ? 'timeout'
       : reason === 'reconnect-failed'
-        ? '[reconnect-failed]'
-        : '[auto-leave]';
+        ? 'reconnect-failed'
+        : 'auto-leave';
+  const tlog = getLogger(tag);
   const notifyPrefix =
     reason === 'timeout'
       ? '⏰ 録音時間上限に到達したので自動停止'
@@ -171,7 +191,7 @@ async function backgroundConvert(
         notifyChannel = ch as { send: (content: string) => Promise<unknown> };
       }
     } catch (err) {
-      console.error(`${tag} failed to fetch text channel:`, err);
+      tlog.error({ err }, 'failed to fetch text channel');
     }
   }
 
@@ -181,15 +201,15 @@ async function backgroundConvert(
   try {
     const result = await processSession(sessionDir, files);
     if (!result.mixedMp3) {
-      console.log(`${tag} no audio to mix`);
+      tlog.info('no audio to mix');
       return;
     }
     mixedMp3 = result.mixedMp3;
     const relPath = relative(process.cwd(), mixedMp3);
     mp3Info = `🎵 \`${relPath}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス)`;
-    console.log(`${tag} MP3 生成完了: ${relPath}`);
+    tlog.info(`MP3 生成完了: ${relPath}`);
   } catch (err) {
-    console.error(`${tag} processSession error:`, err);
+    tlog.error({ err }, 'processSession error');
     const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
     await notifyChannel?.send(`⚠️ ${notifyPrefix} 後の MP3 変換に失敗しました: ${msg}`);
     return;
@@ -249,31 +269,33 @@ voiceManager.on('reconnect_failed', (leaveResult) => {
 });
 
 client.on(Events.Error, (err) => {
-  console.error('Discord client error:', err);
+  log.error({ err }, 'Discord client error');
 });
+
+const shutdownLog = getLogger('shutdown');
 
 let isShuttingDown = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log(`\n⏹️ ${signal} 受信、シャットダウンします`);
+  shutdownLog.info(`⏹️ ${signal} 受信、シャットダウンします`);
 
   // 録音中ならファイルをフラッシュして可能なら MP3 まで生成する
   if (voiceManager.isActive()) {
-    console.log('[shutdown] 録音中のためファイルをフラッシュ中...');
+    shutdownLog.info('録音中のためファイルをフラッシュ中...');
     const leaveResult = voiceManager.leave();
     // ファイルストリームの flush 待ち（OS のバッファ反映時間）
     await new Promise((r) => setTimeout(r, 500));
 
     if (leaveResult.files.length > 0 && leaveResult.sessionDir) {
-      console.log('[shutdown] MP3 変換中...');
+      shutdownLog.info('MP3 変換中...');
       try {
         const result = await processSession(leaveResult.sessionDir, leaveResult.files);
         if (result.mixedMp3) {
-          console.log(`[shutdown] MP3 生成完了: ${relative(process.cwd(), result.mixedMp3)}`);
+          shutdownLog.info(`MP3 生成完了: ${relative(process.cwd(), result.mixedMp3)}`);
         }
       } catch (err) {
-        console.error('[shutdown] MP3 変換失敗:', err);
+        shutdownLog.error({ err }, 'MP3 変換失敗');
       }
     }
   }
@@ -281,7 +303,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   try {
     await client.destroy();
   } catch (err) {
-    console.error('[shutdown] client.destroy() error:', err);
+    shutdownLog.error({ err }, 'client.destroy() error');
   }
   process.exit(0);
 }

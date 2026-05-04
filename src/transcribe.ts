@@ -12,6 +12,10 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { dirname, join as joinPath, resolve as resolvePath } from 'node:path';
+import { getLogger } from './logger.js';
+
+const log = getLogger('transcribe');
+const pyLog = getLogger('transcribe.py');
 
 export interface TranscribeSegment {
   start: number;
@@ -53,7 +57,7 @@ async function spawnTranscribe(audioPath: string): Promise<TranscribeResult> {
   const timeoutMs = getTimeoutMs();
 
   return new Promise((resolve, reject) => {
-    console.log(`[transcribe] spawn: ${python} ${SCRIPT_PATH} ${audioPath}`);
+    log.info(`spawn: ${python} ${SCRIPT_PATH} ${audioPath}`);
     const proc = spawn(python, [SCRIPT_PATH, audioPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -70,13 +74,13 @@ async function spawnTranscribe(audioPath: string): Promise<TranscribeResult> {
       const text = chunk.toString('utf-8');
       stderr += text;
       for (const line of text.split('\n')) {
-        if (line.trim()) console.log(`[transcribe.py] ${line}`);
+        if (line.trim()) pyLog.info(line);
       }
     });
 
     const timer = setTimeout(() => {
       timedOut = true;
-      console.error(`[transcribe] timeout after ${timeoutMs}ms, sending SIGTERM`);
+      log.error(`timeout after ${timeoutMs}ms, sending SIGTERM`);
       proc.kill('SIGTERM');
       setTimeout(() => {
         if (!proc.killed) proc.kill('SIGKILL');
@@ -117,8 +121,8 @@ export async function transcribe(audioPath: string): Promise<TranscribeResult> {
   try {
     return await spawnTranscribe(audioPath);
   } catch (err) {
-    console.error('[transcribe] 1st attempt failed:', err);
-    console.log('[transcribe] retrying once...');
+    log.error({ err }, '1st attempt failed');
+    log.info('retrying once...');
     return await spawnTranscribe(audioPath);
   }
 }
@@ -131,6 +135,6 @@ export async function transcribeAndSave(audioPath: string): Promise<{
   const result = await transcribe(audioPath);
   const transcriptPath = joinPath(dirname(audioPath), 'transcript.json');
   await writeFile(transcriptPath, JSON.stringify(result, null, 2), 'utf-8');
-  console.log(`[transcribe] saved: ${transcriptPath}`);
+  log.info(`saved: ${transcriptPath}`);
   return { result, transcriptPath };
 }

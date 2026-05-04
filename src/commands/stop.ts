@@ -1,6 +1,7 @@
 import { type ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { basename, relative } from 'node:path';
 import { processSession } from '../audio.js';
+import { getLogger } from '../logger.js';
 import {
   type PipelineCallbacks,
   type PipelineStage,
@@ -8,6 +9,8 @@ import {
   runPostMp3Pipeline,
 } from '../pipeline.js';
 import { voiceManager } from '../voice.js';
+
+const log = getLogger('stop');
 
 export const data = new SlashCommandBuilder()
   .setName('stop')
@@ -41,7 +44,7 @@ async function fetchParticipantNames(
       const user = await interaction.client.users.fetch(id);
       names.push(user.displayName || user.username || id);
     } catch (err) {
-      console.warn(`[stop] failed to fetch user ${id}:`, err);
+      log.warn({ err, userId: id }, 'failed to fetch user');
       names.push(id);
     }
   }
@@ -123,7 +126,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       `✅ MP3: \`${relative(process.cwd(), mixedMp3)}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス)`,
     );
   } catch (err) {
-    console.error('[stop] processSession error:', err);
+    log.error({ err }, 'processSession error');
     await interaction.editReply(
       [...baseLines, '', `⚠️ MP3 変換失敗: ${shortError(err)}`].join('\n'),
     );

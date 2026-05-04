@@ -5,7 +5,10 @@ import {
   MessageFlags,
   SlashCommandBuilder,
 } from 'discord.js';
+import { getLogger } from '../logger.js';
 import { voiceManager } from '../voice.js';
+
+const log = getLogger('start');
 
 export const data = new SlashCommandBuilder()
   .setName('start')
@@ -53,11 +56,11 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       await interaction.editReply(`⚠️ ${result.error}`);
     }
   } catch (err) {
-    console.error('[start] join error:', err);
+    log.error({ err }, 'join error');
     try {
       await interaction.editReply('⚠️ VC 接続中に予期せぬエラーが発生しました');
     } catch (innerErr) {
-      console.error('[start] editReply failed:', innerErr);
+      log.error({ err: innerErr }, 'editReply failed');
     }
   }
 }

@@ -14,7 +14,11 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join as joinPath } from 'node:path';
 
+import { getLogger } from './logger.js';
 import type { TranscribeResult, TranscribeSegment } from './transcribe.js';
+
+const log = getLogger('summarize');
+const claudeLog = getLogger('claude');
 
 export interface SummaryAgendaItem {
   topic: string;
@@ -188,7 +192,7 @@ async function spawnClaude(prompt: string): Promise<SummaryResult> {
   const timeoutMs = getTimeoutMs();
 
   return new Promise((resolve, reject) => {
-    console.log(`[summarize] spawn: ${CLAUDE_BIN} -p (prompt ${prompt.length} chars)`);
+    log.info(`spawn: ${CLAUDE_BIN} -p (prompt ${prompt.length} chars)`);
     const proc = spawn(CLAUDE_BIN, ['-p', prompt], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -205,13 +209,13 @@ async function spawnClaude(prompt: string): Promise<SummaryResult> {
       const text = chunk.toString('utf-8');
       stderr += text;
       for (const line of text.split('\n')) {
-        if (line.trim()) console.log(`[claude] ${line}`);
+        if (line.trim()) claudeLog.info(line);
       }
     });
 
     const timer = setTimeout(() => {
       timedOut = true;
-      console.error(`[summarize] timeout after ${timeoutMs}ms, sending SIGTERM`);
+      log.error(`timeout after ${timeoutMs}ms, sending SIGTERM`);
       proc.kill('SIGTERM');
       setTimeout(() => {
         if (!proc.killed) proc.kill('SIGKILL');
@@ -265,8 +269,8 @@ export async function summarize(transcriptPath: string): Promise<SummaryResult> 
   try {
     return await spawnClaude(prompt);
   } catch (err) {
-    console.error('[summarize] 1st attempt failed:', err);
-    console.log('[summarize] retrying once...');
+    log.error({ err }, '1st attempt failed');
+    log.info('retrying once...');
     return await spawnClaude(prompt);
   }
 }
@@ -279,6 +283,6 @@ export async function summarizeAndSave(transcriptPath: string): Promise<{
   const result = await summarize(transcriptPath);
   const summaryPath = joinPath(dirname(transcriptPath), 'summary.json');
   await writeFile(summaryPath, JSON.stringify(result, null, 2), 'utf-8');
-  console.log(`[summarize] saved: ${summaryPath}`);
+  log.info(`saved: ${summaryPath}`);
   return { result, summaryPath };
 }

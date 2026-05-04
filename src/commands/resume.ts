@@ -1,5 +1,6 @@
 import { type ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { relative } from 'node:path';
+import { getLogger } from '../logger.js';
 import {
   type PipelineCallbacks,
   type PipelineStage,
@@ -11,6 +12,8 @@ import {
   RECORDINGS_BASE,
   runPostMp3Pipeline,
 } from '../pipeline.js';
+
+const log = getLogger('resume');
 
 export const data = new SlashCommandBuilder()
   .setName('resume')
@@ -137,7 +140,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       await interaction.editReply(baseLines.join('\n'));
     }
   } catch (err) {
-    console.error('[resume] error:', err);
+    log.error({ err }, 'error');
     baseLines.push(`⚠️ 再開処理中に予期せぬエラー: ${shortError(err)}`);
     try {
       await interaction.editReply(baseLines.join('\n'));

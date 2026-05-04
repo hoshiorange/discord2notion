@@ -11,7 +11,10 @@
 
 import { Client } from '@notionhq/client';
 
+import { getLogger } from './logger.js';
 import type { SummaryResult } from './summarize.js';
+
+const log = getLogger('notion');
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
@@ -183,7 +186,7 @@ function filterValidTags(tags: string[]): { name: string }[] {
     if (VALID_TAGS.has(t)) {
       filtered.push({ name: t });
     } else {
-      console.warn(`[notion] 未知のタグをスキップ: ${t}`);
+      log.warn(`未知のタグをスキップ: ${t}`);
     }
   }
   return filtered;
@@ -237,8 +240,8 @@ export async function createMeetingPage(
   const properties = buildProperties(args);
   const children = buildChildren(args.summary);
 
-  console.log(
-    `[notion] creating page: session=${args.sessionId} startedAt=${args.startedAt.toISOString()}`,
+  log.info(
+    `creating page: session=${args.sessionId} startedAt=${args.startedAt.toISOString()}`,
   );
 
   const response = await client.pages.create({
@@ -250,7 +253,7 @@ export async function createMeetingPage(
   const pageId = response.id;
   const pageUrl = 'url' in response && typeof response.url === 'string' ? response.url : '';
 
-  console.log(`[notion] created: ${pageUrl || pageId}`);
+  log.info(`created: ${pageUrl || pageId}`);
 
   return { pageUrl, pageId };
 }

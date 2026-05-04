@@ -19,6 +19,9 @@ import { createWriteStream, promises as fs } from 'node:fs';
 import { open as fsOpen } from 'node:fs/promises';
 import { basename, join as joinPath } from 'node:path';
 import { opus } from 'prism-media';
+import { getLogger } from './logger.js';
+
+const log = getLogger('audio');
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
@@ -100,7 +103,7 @@ async function mixPcmToMp3(pcmPaths: string[], outputMp3: string): Promise<void>
   }
   args.push('-c:a', 'libmp3lame', '-q:a', '2', '-y', outputMp3);
 
-  console.log(`[audio] ffmpeg ${args.join(' ')}`);
+  log.info(`ffmpeg ${args.join(' ')}`);
 
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
@@ -135,12 +138,12 @@ export async function processSession(
   const pcmPaths: string[] = [];
   for (const f of opusrawFiles) {
     const pcm = joinPath(sessionDir, `${f.userId}.pcm`);
-    console.log(`[audio] decoding ${basename(f.filename)} → ${basename(pcm)}`);
+    log.info(`decoding ${basename(f.filename)} → ${basename(pcm)}`);
     try {
       await decodeOpusrawToPcmFile(f.filename, pcm);
       pcmPaths.push(pcm);
     } catch (err) {
-      console.error(`[audio] decode failed for ${f.filename}:`, err);
+      log.error({ err, file: f.filename }, 'decode failed');
       // このユーザーはスキップして他は処理
     }
   }
@@ -150,7 +153,7 @@ export async function processSession(
   }
 
   const mixedMp3 = joinPath(sessionDir, 'mixed.mp3');
-  console.log(`[audio] mixing ${pcmPaths.length} PCM(s) → ${basename(mixedMp3)}`);
+  log.info(`mixing ${pcmPaths.length} PCM(s) → ${basename(mixedMp3)}`);
   await mixPcmToMp3(pcmPaths, mixedMp3);
 
   // 中間 PCM 削除
@@ -158,7 +161,7 @@ export async function processSession(
     try {
       await fs.unlink(pcm);
     } catch (err) {
-      console.warn(`[audio] failed to delete ${pcm}:`, err);
+      log.warn({ err, pcm }, 'failed to delete pcm');
     }
   }
 

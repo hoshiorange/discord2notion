@@ -17,9 +17,12 @@ import type { CreateMeetingPageResult } from './notion.js';
 import type { SummaryResult } from './summarize.js';
 import type { UploadResult } from './drive.js';
 import { createMeetingPage } from './notion.js';
+import { getLogger } from './logger.js';
 import { summarizeAndSave } from './summarize.js';
 import { transcribeAndSave } from './transcribe.js';
 import { uploadSession } from './drive.js';
+
+const log = getLogger('pipeline');
 
 export type PipelineStage = 'transcribe' | 'summary' | 'drive' | 'notion';
 
@@ -88,7 +91,7 @@ export async function loadPipelineState(sessionDir: string): Promise<PipelineSta
     const raw = await readFile(path, 'utf-8');
     return JSON.parse(raw) as PipelineState;
   } catch (err) {
-    console.error(`[pipeline] failed to read state ${path}:`, err);
+    log.error({ err }, `failed to read state ${path}`);
     return null;
   }
 }
@@ -99,7 +102,7 @@ export async function savePipelineState(state: PipelineState): Promise<void> {
   try {
     await writeFile(path, JSON.stringify(state, null, 2), 'utf-8');
   } catch (err) {
-    console.error(`[pipeline] failed to write state ${path}:`, err);
+    log.error({ err }, `failed to write state ${path}`);
   }
 }
 
@@ -155,7 +158,7 @@ async function recordFailure(
   err: unknown,
 ): Promise<PipelineState> {
   const e = asError(err);
-  console.error(`[pipeline] ${stage} failed:`, e);
+  log.error({ err: e }, `${stage} failed`);
   state.failedStage = stage;
   state.failedError = e.message;
   await savePipelineState(state);

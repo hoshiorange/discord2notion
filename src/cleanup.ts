@@ -14,12 +14,15 @@ import { existsSync } from 'node:fs';
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join as joinPath, resolve as resolvePath } from 'node:path';
 
+import { getLogger } from './logger.js';
 import {
   PIPELINE_STAGES,
   RECORDINGS_BASE,
   loadPipelineState,
   type PipelineState,
 } from './pipeline.js';
+
+const log = getLogger('cleanup');
 
 const DEFAULT_RETAIN_DAYS = 30;
 
@@ -74,7 +77,7 @@ export async function cleanupOldSessions(opts?: CleanupOptions): Promise<Cleanup
   try {
     entries = await readdir(recordingsDir);
   } catch (err) {
-    console.error(`[cleanup] failed to read ${recordingsDir}:`, err);
+    log.error({ err }, `failed to read ${recordingsDir}`);
     return result;
   }
 
@@ -85,7 +88,7 @@ export async function cleanupOldSessions(opts?: CleanupOptions): Promise<Cleanup
     try {
       dirStat = await stat(sessionDir);
     } catch (err) {
-      console.warn(`[cleanup] stat failed for ${sessionDir}:`, err);
+      log.warn({ err }, `stat failed for ${sessionDir}`);
       continue;
     }
     if (!dirStat.isDirectory()) continue;
@@ -110,7 +113,7 @@ export async function cleanupOldSessions(opts?: CleanupOptions): Promise<Cleanup
       await rm(sessionDir, { recursive: true, force: true });
       result.deleted.push(entry);
     } catch (err) {
-      console.error(`[cleanup] failed to remove ${sessionDir}:`, err);
+      log.error({ err }, `failed to remove ${sessionDir}`);
       result.kept.push({ sessionId: entry, reason: 'incomplete' });
     }
   }

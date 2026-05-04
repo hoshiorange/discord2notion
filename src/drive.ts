@@ -13,6 +13,9 @@ import { basename, isAbsolute, join as joinPath, resolve as resolvePath } from '
 import { google } from 'googleapis';
 import type { OAuth2Client } from 'google-auth-library';
 import type { drive_v3 } from 'googleapis';
+import { getLogger } from './logger.js';
+
+const log = getLogger('drive');
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const ROOT_FOLDER_NAME = 'meetingBot';
@@ -203,14 +206,14 @@ export async function uploadSession(
     for (const target of targets) {
       const { webViewLink } = await uploadFile(drive, sessionFolderId, target.absPath);
       fileUrls[target.name] = webViewLink;
-      console.log(`[drive] uploaded: ${target.name} -> ${webViewLink}`);
+      log.info(`uploaded: ${target.name} -> ${webViewLink}`);
     }
 
     const folderUrl = `https://drive.google.com/drive/folders/${sessionFolderId}`;
     return { folderUrl, fileUrls };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[drive] upload failed: ${message}`);
+    log.error({ err }, `upload failed: ${message}`);
     throw err instanceof Error ? err : new Error(message);
   }
 }
