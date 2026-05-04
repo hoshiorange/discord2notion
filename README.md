@@ -295,4 +295,4 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 
 ## ライセンス
 
-UNLICENSED（個人利用想定）。
+MIT License（[`LICENSE`](./LICENSE) 参照）。

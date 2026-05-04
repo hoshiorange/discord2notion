@@ -23,7 +23,7 @@
     "transcription"
   ],
   "author": "hoshiorange",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
     "@notionhq/client": "^5.20.0",
