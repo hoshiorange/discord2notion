@@ -103,9 +103,9 @@ npm start           # Bot 起動
 
 Bot がログインしたら、招待先の Discord サーバーで `/start` を試す。スラッシュコマンドの初回反映には `DISCORD_GUILD_ID` 設定有り → 即時、無し → 最大1時間かかる。
 
-## PC 再起動後の起動手順
+## PC 再起動後 → 初回設定済みの場合の起動手順
 
-通常運用時、PC を再起動した後にこの Bot を再起動するには：
+`.env` 設定や依存インストールが済んでいる環境（自分の PC を再起動した時、別日に再開する時など）でこの Bot を起動するには：
 
 ```powershell
 cd C:\git\meetingBot
@@ -116,6 +116,33 @@ npm start
 
 `npm start` は `dist/index.js` を実行するため、ソース変更後は事前に `npm run build` が必要。
 普段から `.ts` を編集して即反映させたい場合は代わりに `npm run dev`（tsx watch）を使う。
+
+### 文字化け対策
+
+#### Windows PowerShell での文字化け
+
+Windows PowerShell（既定の Shift_JIS）で起動するとログ出力が文字化けする場合がある。
+
+**対処法：**
+
+`npm start` の前に以下を一度打って **コードページを UTF-8 に切り替える**：
+
+```powershell
+chcp 65001
+npm start
+```
+
+そのウィンドウを閉じると元に戻るので、毎回必要。
+
+**恒久対処：**
+
+以下のいずれかで常時 UTF-8 環境にできる：
+
+- PowerShell プロファイル（`$PROFILE`）に `chcp 65001 | Out-Null` を追記
+- Windows Terminal を使用（既定で UTF-8）
+- VS Code 統合ターミナルを使用（既定で UTF-8）
+
+**重要：** `logs/` 配下のログファイル自体は UTF-8 で正しく書かれているので、文字化けはコンソール表示時のみの問題。ファイル内容に問題はない。
 
 ### 起動後の確認
 
