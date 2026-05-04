@@ -38,5 +38,6 @@ Thumbs.db
 
 # Claude Code（個人ワークフロー設定）
 .mcp.json
+.claude/
 team/
 CLAUDE.md
