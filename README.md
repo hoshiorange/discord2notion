@@ -293,6 +293,15 @@ recordings/<sessionId>/      # 録音セッションごとのファイル（giti
 - `PYTHON_BIN` — Python 実行ファイル指定（既定 `.venv/Scripts/python.exe` 自動検出）
 - `CLAUDE_BIN` — claude CLI 指定（既定 `claude`）
 
-## ライセンス
+## License & Contributions
 
-MIT License（[`LICENSE`](./LICENSE) 参照）。
+This project is currently licensed under MIT (see [`LICENSE`](./LICENSE)).
+The maintainer reserves the right to change the license for future versions.
+Contributors agree that their contributions may be relicensed.
+
+(本プロジェクトは現在 MIT ライセンスで公開されています。メンテナは将来
+バージョンのライセンスを変更する権利を留保します。コントリビューターは、
+自身のコントリビューションが再ライセンスされ得ることに同意したものとみな
+されます。)
+
+コントリビュート方法・PR / Issue の作法は [`CONTRIBUTING.md`](./CONTRIBUTING.md) を参照してください。
