@@ -185,6 +185,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       mixedMp3Path: mixedMp3,
       channelName,
       textChannelId,
+      guildId: interaction.guildId,
       files,
       participants,
       userWavs,

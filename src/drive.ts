@@ -13,6 +13,8 @@ import { basename, isAbsolute, join as joinPath, resolve as resolvePath } from '
 import { google } from 'googleapis';
 import type { OAuth2Client } from 'google-auth-library';
 import type { drive_v3 } from 'googleapis';
+
+import { assertDriveConfigured, loadGuildConfig, type GuildConfig } from './config.js';
 import { getLogger } from './logger.js';
 
 const log = getLogger('drive');
@@ -30,20 +32,22 @@ interface OAuthClientSecret {
   web?: { client_id?: string; client_secret?: string };
 }
 
-let cachedAuth: OAuth2Client | null = null;
-let cachedDrive: drive_v3.Drive | null = null;
+/**
+ * AIP-38: Guild ごとに別 Google アカウントを使えるよう、認証情報の組み合わせ単位でキャッシュする。
+ * キーは「credentialsPath|refreshToken」のハッシュ代わりの文字列（同じ env を使う Guild 同士は共有）。
+ */
+const cachedAuthByKey = new Map<string, OAuth2Client>();
+const cachedDriveByKey = new Map<string, drive_v3.Drive>();
 
-async function loadOAuthClient(): Promise<OAuth2Client> {
-  if (cachedAuth) return cachedAuth;
+function authCacheKey(credentialsPath: string, refreshToken: string): string {
+  return `${credentialsPath}|${refreshToken}`;
+}
 
-  const credentialsPath = process.env.GOOGLE_DRIVE_CREDENTIALS;
-  const refreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
-  if (!credentialsPath) {
-    throw new Error('GOOGLE_DRIVE_CREDENTIALS が .env に設定されていません');
-  }
-  if (!refreshToken) {
-    throw new Error('GOOGLE_DRIVE_REFRESH_TOKEN が .env に設定されていません');
-  }
+async function loadOAuthClient(cfg: GuildConfig): Promise<OAuth2Client> {
+  const { credentialsPath, refreshToken } = assertDriveConfigured(cfg);
+  const key = authCacheKey(credentialsPath, refreshToken);
+  const cached = cachedAuthByKey.get(key);
+  if (cached) return cached;
 
   const absCredsPath = isAbsolute(credentialsPath)
     ? credentialsPath
@@ -66,15 +70,19 @@ async function loadOAuthClient(): Promise<OAuth2Client> {
 
   const auth = new google.auth.OAuth2(section.client_id, section.client_secret);
   auth.setCredentials({ refresh_token: refreshToken });
-  cachedAuth = auth;
+  cachedAuthByKey.set(key, auth);
   return auth;
 }
 
-async function getDrive(): Promise<drive_v3.Drive> {
-  if (cachedDrive) return cachedDrive;
-  const auth = await loadOAuthClient();
-  cachedDrive = google.drive({ version: 'v3', auth });
-  return cachedDrive;
+async function getDrive(cfg: GuildConfig): Promise<drive_v3.Drive> {
+  const { credentialsPath, refreshToken } = assertDriveConfigured(cfg);
+  const key = authCacheKey(credentialsPath, refreshToken);
+  const cached = cachedDriveByKey.get(key);
+  if (cached) return cached;
+  const auth = await loadOAuthClient(cfg);
+  const drive = google.drive({ version: 'v3', auth });
+  cachedDriveByKey.set(key, drive);
+  return drive;
 }
 
 function escapeQueryValue(value: string): string {
@@ -207,6 +215,10 @@ function monthFolderName(date: Date): string {
 export interface UploadOptions {
   /** true なら既存同名ファイルがあっても新規作成する（デフォルト false: 既存があれば上書き） */
   force?: boolean;
+  /**
+   * AIP-38: Guild 別の認証情報。未指定なら process.env から解決（後方互換）。
+   */
+  guildConfig?: GuildConfig;
 }
 
 /**
@@ -240,7 +252,8 @@ export async function uploadSession(
     targets.push({ absPath, name: basename(absPath) });
   }
 
-  const drive = await getDrive();
+  const cfg = options.guildConfig ?? loadGuildConfig(null);
+  const drive = await getDrive(cfg);
 
   try {
     const rootId = await ensureFolder(drive, ROOT_FOLDER_NAME, null);

@@ -19,6 +19,7 @@ import type { TranscribeResult } from './transcribe.js';
 import type { UploadResult } from './drive.js';
 import { createMeetingPage } from './notion.js';
 import { getLogger } from './logger.js';
+import { loadGuildConfig } from './config.js';
 import { summarizeAndSave } from './summarize.js';
 import { transcribeAndSave, transcribeUsersAndSave } from './transcribe.js';
 import { uploadSession } from './drive.js';
@@ -40,6 +41,8 @@ export interface PipelineState {
   durationMs: number;
   channelName: string | null;
   textChannelId: string | null;
+  /** AIP-38: Guild ID（マルチ Guild 対応）。null は未指定（DM や旧 state 互換）。 */
+  guildId: string | null;
   files: { userId: string; filename: string }[];
   participants: string[];
   mixedMp3Path: string;
@@ -77,6 +80,8 @@ export interface PipelineInput {
   mixedMp3Path: string;
   channelName?: string | null;
   textChannelId?: string | null;
+  /** AIP-38: Guild ID（マルチ Guild 対応）。null/未指定なら process.env を使う（後方互換）。 */
+  guildId?: string | null;
   files?: { userId: string; filename: string }[];
   participants?: string[];
   /** AIP-37: ユーザー別 WAV。あれば話者識別 transcribe を使う。 */
@@ -123,6 +128,7 @@ function createInitialState(input: PipelineInput): PipelineState {
     durationMs: input.durationMs,
     channelName: input.channelName ?? null,
     textChannelId: input.textChannelId ?? null,
+    guildId: input.guildId ?? null,
     files: input.files ?? [],
     participants: input.participants ?? [],
     mixedMp3Path: input.mixedMp3Path,
@@ -152,6 +158,8 @@ async function getOrInitState(input: PipelineInput): Promise<PipelineState> {
   // AIP-37: userWavs / speakerNames は新規入力で更新（resume 時にディスク上の WAV が消えてる可能性を許容）
   if (input.userWavs) existing.userWavs = input.userWavs;
   if (input.speakerNames) existing.speakerNames = input.speakerNames;
+  // AIP-38: guildId は新規入力で上書き（resume 時に呼び出し側の interaction.guildId を使う）
+  if (input.guildId !== undefined) existing.guildId = input.guildId;
   await savePipelineState(existing);
   return existing;
 }
@@ -263,16 +271,23 @@ export async function runPostMp3Pipeline(
   });
   if (!r2.ok) return state;
 
+  // AIP-38: Guild 別 config を解決（state に保存されている guildId を信頼。resume でも一貫）
+  const guildConfig = loadGuildConfig(state.guildId);
+
   // Step 3: drive upload
   const r3 = await runStage('drive', state, callbacks, async () => {
     if (!state.transcript || !state.summary) {
       throw new Error('prerequisite stage missing');
     }
-    const r = await uploadSession(input.sessionDir, [
-      basename(input.mixedMp3Path),
-      basename(state.transcript.transcriptPath),
-      basename(state.summary.summaryPath),
-    ]);
+    const r = await uploadSession(
+      input.sessionDir,
+      [
+        basename(input.mixedMp3Path),
+        basename(state.transcript.transcriptPath),
+        basename(state.summary.summaryPath),
+      ],
+      { guildConfig },
+    );
     state.drive = r;
   });
   if (!r3.ok) return state;
@@ -298,6 +313,7 @@ export async function runPostMp3Pipeline(
       transcriptUrl,
       participants: state.participants,
       transcriptSegments: transcript.segments,
+      guildConfig,
     });
     state.notion = r;
   });
@@ -315,6 +331,7 @@ export function inputFromState(state: PipelineState): PipelineInput {
     mixedMp3Path: state.mixedMp3Path,
     channelName: state.channelName,
     textChannelId: state.textChannelId,
+    guildId: state.guildId,
     files: state.files,
     participants: state.participants,
     userWavs: state.userWavs,

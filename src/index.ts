@@ -196,8 +196,16 @@ async function backgroundConvert(
   leaveResult: VoiceLeaveResult,
   reason: ConvertReason,
 ): Promise<void> {
-  const { sessionDir, textChannelId, files, sessionId, durationMs, startedAt, channelName } =
-    leaveResult;
+  const {
+    sessionDir,
+    textChannelId,
+    files,
+    sessionId,
+    durationMs,
+    startedAt,
+    channelName,
+    guildId,
+  } = leaveResult;
   if (!sessionDir) return;
   const tag =
     reason === 'timeout'
@@ -260,6 +268,7 @@ async function backgroundConvert(
     mixedMp3Path: mixedMp3,
     channelName,
     textChannelId,
+    guildId,
     files,
     participants,
     userWavs,
