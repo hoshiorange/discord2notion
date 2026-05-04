@@ -2,9 +2,12 @@ import 'dotenv/config';
 import { relative } from 'node:path';
 import { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } from 'discord.js';
 import { processSession } from './audio.js';
+import { cleanupOldSessions } from './cleanup.js';
 import { commands, commandsByName } from './commands/index.js';
 import { runPostMp3Pipeline } from './pipeline.js';
 import { type VoiceLeaveResult, voiceManager } from './voice.js';
+
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -41,7 +44,21 @@ client.once(Events.ClientReady, async (readyClient) => {
   } catch (err) {
     console.error('スラッシュコマンド登録失敗:', err);
   }
+
+  void runCleanup();
+  setInterval(() => {
+    void runCleanup();
+  }, CLEANUP_INTERVAL_MS);
 });
+
+async function runCleanup(): Promise<void> {
+  try {
+    const r = await cleanupOldSessions();
+    console.log(`[cleanup] deleted=${r.deleted.length} kept=${r.kept.length}`);
+  } catch (err) {
+    console.error('[cleanup] error:', err);
+  }
+}
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
