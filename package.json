@@ -1,6 +1,6 @@
 {
   "name": "meetingbot",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Discord議事録Bot - 録音→文字起こし→Claude要約→Notion議事録",
   "type": "module",
