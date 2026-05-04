@@ -274,7 +274,6 @@ GOOGLE_DRIVE_REFRESH_TOKEN=1//xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `refresh_token が取得できませんでした` | 過去の許可が残っている。[Google アカウントの権限管理](https://myaccount.google.com/permissions) で `meetingbot` を取り消してから再実行 |
 | `credentials.json が見つかりません` | パスが違う。`.env` の `GOOGLE_DRIVE_CREDENTIALS` を絶対パスにするか、`credentials.json` をプロジェクトルートに配置 |
 | `invalid_grant` | refresh_token 期限切れ／取り消し。`scripts/test_drive.py` を再実行 |
-| 同名ファイルが Drive に重複 | `/resume` で Drive ステージを再実行した場合に発生する既知問題（README 「Drive 同名ファイルの重複」項参照）|
 
 ---
 
