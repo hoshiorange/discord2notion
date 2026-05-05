@@ -5,7 +5,7 @@
  * 仕様:
  *   - 失敗時は1回だけ自動リトライ
  *   - タイムアウトは `SUMMARIZE_TIMEOUT_MS`（既定 10 分）
- *   - stdin は DEVNULL に明示リダイレクト（claude の対話入力待ちを避ける）
+ *   - プロンプトは stdin で渡す（Windows の CreateProcess コマンドライン長上限 ~32k を回避）
  *   - stderr は逐次バッファ + ログ転送（`[claude] ...` プレフィックス）
  *   - claude の stdout から JSON 部分を抽出してパース
  */
@@ -199,11 +199,17 @@ async function spawnClaude(prompt: string): Promise<SummaryResult> {
   const timeoutMs = getTimeoutMs();
 
   return new Promise((resolve, reject) => {
-    log.info(`spawn: ${CLAUDE_BIN} -p (prompt ${prompt.length} chars)`);
-    const proc = spawn(CLAUDE_BIN, ['-p', prompt], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    log.info(`spawn: ${CLAUDE_BIN} -p (prompt ${prompt.length} chars, via stdin)`);
+    const proc = spawn(CLAUDE_BIN, ['-p'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
+
+    proc.stdin.on('error', (err) => {
+      log.error({ err }, 'failed to write prompt to claude stdin');
+    });
+    proc.stdin.write(prompt, 'utf-8');
+    proc.stdin.end();
 
     let stdout = '';
     let stderr = '';
