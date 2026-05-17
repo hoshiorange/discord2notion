@@ -26,6 +26,7 @@ export const data = new SlashCommandBuilder()
   );
 
 const STAGE_LABEL: Record<PipelineStage, string> = {
+  mp3: '🔧 MP3 変換',
   transcribe: '📝 文字起こし',
   summary: '📋 要約',
   drive: '☁️ Drive アップロード',
@@ -38,6 +39,10 @@ function shortError(err: unknown): string {
 
 function pipelineDoneLine(stage: PipelineStage, state: PipelineState): string {
   switch (stage) {
+    case 'mp3':
+      return state.mp3
+        ? `✅ MP3: \`${relative(process.cwd(), state.mp3.mixedMp3Path)}\` (${state.mp3.durationSec.toFixed(1)}秒で ${state.mp3.inputCount} ユーザー分をミックス)`
+        : '✅ MP3 変換完了';
     case 'transcribe':
       return state.transcript
         ? `✅ 文字起こし: \`${relative(process.cwd(), state.transcript.transcriptPath)}\` — ${state.transcript.segments} segments / RT比 ${state.transcript.rtFactor.toFixed(1)}x`

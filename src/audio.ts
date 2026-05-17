@@ -2,7 +2,7 @@
  * 録音セッションの音声処理を担当する。
  *
  * AIP-22:
- *   1. `.opusraw` (length-prefixed Opus packets) を読み取り、prism-media の opus.Decoder で PCM に展開
+ *   1. `.opusraw` (length-prefixed Opus packets) を読み取り、opusscript で PCM に展開
  *   2. 各ユーザーの PCM 一時ファイルを生成
  *   3. FFmpeg の `amix` フィルタで複数ユーザーをミックスし、MP3 出力
  *   4. PCM 一時ファイルを削除
@@ -12,20 +12,25 @@
  *     ミックス時にユーザー間の発話タイミングが揃わない（全員 t=0 から並列再生）。
  *   - 個々のユーザー音声は時系列が連続しているので、Phase 5 の文字起こし用途には支障なし。
  *   - 会議として聞き直す用途で違和感が出る場合は、Phase 6 でタイムスタンプ付き形式に拡張。
+ *
+ * 破損パケット耐性:
+ *   prism-media の opus.Decoder（Transform stream）は 1 パケットの decode 失敗で
+ *   'error' イベントを emit してストリームが壊れ、unhandled rejection でプロセスごと
+ *   落ちる事故があったため、opusscript を直接呼ぶ実装に変更し、個別パケットの
+ *   decode 失敗は warn ログを出してスキップして次へ進むようにしている。
  */
 
 import { spawn } from 'node:child_process';
 import { createWriteStream, promises as fs } from 'node:fs';
 import { open as fsOpen } from 'node:fs/promises';
 import { basename, join as joinPath } from 'node:path';
-import { opus } from 'prism-media';
+import OpusScript from 'opusscript';
 import { getLogger } from './logger.js';
 
 const log = getLogger('audio');
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
-const FRAME_SIZE = 960; // 20ms @ 48kHz
 
 const MAX_OPUS_PACKET_SIZE = 4000; // 安全マージン込み
 
@@ -44,23 +49,23 @@ export interface ProcessSessionResult {
 }
 
 /**
- * `.opusraw` ファイルからパケットを読み取り、Opus Decoder にフィードして PCM ファイルに書き出す。
+ * `.opusraw` ファイルからパケットを読み取り、opusscript で同期 decode して PCM ファイルに書き出す。
+ * 個別パケットの decode 失敗（壊れた Opus パケット）はスキップして続行する。
  */
-async function decodeOpusrawToPcmFile(opusrawPath: string, pcmPath: string): Promise<void> {
-  const decoder = new opus.Decoder({
-    frameSize: FRAME_SIZE,
-    channels: CHANNELS,
-    rate: SAMPLE_RATE,
-  });
+async function decodeOpusrawToPcmFile(
+  opusrawPath: string,
+  pcmPath: string,
+): Promise<{ decoded: number; skipped: number }> {
+  const decoder = new OpusScript(SAMPLE_RATE, CHANNELS, OpusScript.Application.AUDIO);
   const pcmStream = createWriteStream(pcmPath);
 
   const writeDone = new Promise<void>((resolve, reject) => {
     pcmStream.on('finish', resolve);
     pcmStream.on('error', reject);
-    decoder.on('error', reject);
   });
 
-  decoder.pipe(pcmStream);
+  let decoded = 0;
+  let skipped = 0;
 
   const fh = await fsOpen(opusrawPath, 'r');
   try {
@@ -74,6 +79,7 @@ async function decodeOpusrawToPcmFile(opusrawPath: string, pcmPath: string): Pro
 
       const len = lenBuf.readUInt32LE(0);
       if (len === 0 || len > MAX_OPUS_PACKET_SIZE) {
+        // length-prefix が壊れている場合はそれ以降の境界も信用できないので中断
         throw new Error(`invalid packet length ${len} in ${opusrawPath}`);
       }
 
@@ -83,14 +89,42 @@ async function decodeOpusrawToPcmFile(opusrawPath: string, pcmPath: string): Pro
         throw new Error(`truncated packet (expected ${len}, got ${r2.bytesRead}) in ${opusrawPath}`);
       }
 
-      decoder.write(packet);
+      let pcm: Buffer;
+      try {
+        pcm = decoder.decode(packet);
+      } catch (err) {
+        skipped++;
+        if (skipped <= 5 || skipped % 500 === 0) {
+          log.warn(
+            {
+              err: (err as Error).message,
+              packetBytes: packet.length,
+              skipped,
+              file: basename(opusrawPath),
+            },
+            'opus packet decode failed (skip)',
+          );
+        }
+        continue;
+      }
+
+      if (!pcmStream.write(pcm)) {
+        await new Promise<void>((resolve) => pcmStream.once('drain', resolve));
+      }
+      decoded++;
     }
   } finally {
+    try {
+      decoder.delete();
+    } catch {
+      // ignore
+    }
     await fh.close();
+    pcmStream.end();
   }
 
-  decoder.end();
   await writeDone;
+  return { decoded, skipped };
 }
 
 async function runFfmpeg(args: string[]): Promise<void> {
@@ -172,8 +206,15 @@ export async function processSession(
     const pcm = joinPath(sessionDir, `${f.userId}.pcm`);
     log.info(`decoding ${basename(f.filename)} → ${basename(pcm)}`);
     try {
-      await decodeOpusrawToPcmFile(f.filename, pcm);
+      const r = await decodeOpusrawToPcmFile(f.filename, pcm);
       decoded.push({ userId: f.userId, pcmPath: pcm });
+      if (r.skipped > 0) {
+        log.warn(
+          `${basename(f.filename)}: decoded ${r.decoded} packets, skipped ${r.skipped} broken packets`,
+        );
+      } else {
+        log.info(`${basename(f.filename)}: decoded ${r.decoded} packets`);
+      }
     } catch (err) {
       log.error({ err, file: f.filename }, 'decode failed');
       // このユーザーはスキップして他は処理

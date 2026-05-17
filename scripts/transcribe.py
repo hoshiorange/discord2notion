@@ -177,10 +177,16 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        code = main()
     except KeyboardInterrupt:
         log("interrupted")
-        sys.exit(130)
+        code = 130
     except Exception as e:  # noqa: BLE001
         log(f"FATAL: {type(e).__name__}: {e}")
-        sys.exit(1)
+        code = 1
+    # CTranslate2 / faster-whisper のデストラクタが CUDA 解放時に Windows で
+    # 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN, exit code 3221226505) で死ぬのを
+    # 避けるため、通常の sys.exit ではなく os._exit で即終了する（デストラクタをスキップ）。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

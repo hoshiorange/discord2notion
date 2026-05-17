@@ -1,6 +1,5 @@
 import { type ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { basename, relative } from 'node:path';
-import { processSession } from '../audio.js';
 import { getLogger } from '../logger.js';
 import {
   type PipelineCallbacks,
@@ -17,6 +16,7 @@ export const data = new SlashCommandBuilder()
   .setDescription('録音を停止し、MP3 → 文字起こし → 要約 → Drive → Notion まで一気通貫で実行します');
 
 const STAGE_LABEL: Record<PipelineStage, string> = {
+  mp3: '🔧 MP3 変換',
   transcribe: '📝 文字起こし',
   summary: '📋 要約',
   drive: '☁️ Drive アップロード',
@@ -71,6 +71,10 @@ async function fetchSpeakerNames(
 
 function pipelineDoneLine(stage: PipelineStage, state: PipelineState): string {
   switch (stage) {
+    case 'mp3':
+      return state.mp3
+        ? `✅ MP3: \`${relative(process.cwd(), state.mp3.mixedMp3Path)}\` (${state.mp3.durationSec.toFixed(1)}秒で ${state.mp3.inputCount} ユーザー分をミックス)`
+        : '✅ MP3 変換完了';
     case 'transcribe':
       return state.transcript
         ? `✅ 文字起こし: \`${relative(process.cwd(), state.transcript.transcriptPath)}\` — ${state.transcript.segments} segments / RT比 ${state.transcript.rtFactor.toFixed(1)}x`
@@ -128,32 +132,10 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     return;
   }
 
-  // === Step 1: MP3 mix（AIP-37: ユーザー別 WAV も同時生成） ===
-  await interaction.editReply([...baseLines, '', '🔧 MP3 に変換中...'].join('\n'));
+  baseLines.push('');
 
-  let mixedMp3: string | null = null;
-  let userWavs: { userId: string; wavPath: string }[] = [];
-  try {
-    const result = await processSession(sessionDir, files);
-    mixedMp3 = result.mixedMp3;
-    userWavs = result.userWavs;
-    if (!mixedMp3) {
-      await interaction.editReply([...baseLines, '', '⚠️ ミックスする音声がありませんでした'].join('\n'));
-      return;
-    }
-    baseLines.push('');
-    baseLines.push(
-      `✅ MP3: \`${relative(process.cwd(), mixedMp3)}\` (${result.durationSec.toFixed(1)}秒で ${result.inputCount} ユーザー分をミックス, userWavs=${userWavs.length})`,
-    );
-  } catch (err) {
-    log.error({ err }, 'processSession error');
-    await interaction.editReply(
-      [...baseLines, '', `⚠️ MP3 変換失敗: ${shortError(err)}`].join('\n'),
-    );
-    return;
-  }
-
-  // === Step 2-5: pipeline (transcribe → summary → drive → notion) ===
+  // === MP3 → 文字起こし → 要約 → Drive → Notion を一気通貫実行 ===
+  // AIP-39/40: MP3 もパイプラインステージ化されたので、失敗しても pipeline-state.json が残り /resume で再開可能。
   const userIds = files.map((f) => f.userId);
   const participants = await fetchParticipantNames(interaction, userIds);
   const speakerNames = await fetchSpeakerNames(interaction, userIds);
@@ -168,7 +150,8 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       await interaction.editReply(baseLines.join('\n'));
     },
     onStageFailed: async (stage, error) => {
-      baseLines.push(`⚠️ ${STAGE_LABEL[stage]} 失敗: ${error.message.slice(0, 200)}`);
+      log.error({ err: error, stage }, 'pipeline stage failed');
+      baseLines.push(`⚠️ ${STAGE_LABEL[stage]} 失敗: ${shortError(error)}`);
       baseLines.push(
         `クォータ復活など解消後に \`/resume\` で再開できます（セッション: \`${sessionId ?? '不明'}\`）`,
       );
@@ -182,13 +165,11 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
       sessionId: sessionId ?? 'unknown',
       startedAt: effectiveStartedAt,
       durationMs,
-      mixedMp3Path: mixedMp3,
       channelName,
       textChannelId,
       guildId: interaction.guildId,
       files,
       participants,
-      userWavs,
       speakerNames,
     },
     callbacks,

@@ -1,12 +1,14 @@
 /**
- * Phase 5 統合パイプライン: 文字起こし → 要約 → Drive アップロード → Notion ページ生成 を順次実行する。
+ * Phase 5 統合パイプライン: MP3 ミックス → 文字起こし → 要約 → Drive アップロード → Notion ページ生成 を順次実行する。
  *
  * AIP-31:
  * - 各ステージの完了状態を `pipeline-state.json` に永続化
  * - 既存 state があれば失敗したステージから再開
  * - `/resume` コマンドから呼び出し可能
  *
- * MP3 生成はこの関数の前段で済んでいる前提（呼び出し側で `processSession` を実行）。
+ * MP3 ステージはこのパイプラインの最初に組み込まれている。
+ * 失敗しても state が残るため、原因を解消した上で `/resume session_id:<id>` から
+ * MP3 ステージ含めて再開できる（AIP-39）。
  */
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
@@ -17,6 +19,7 @@ import type { CreateMeetingPageResult } from './notion.js';
 import type { SummaryResult } from './summarize.js';
 import type { TranscribeResult } from './transcribe.js';
 import type { UploadResult } from './drive.js';
+import { processSession } from './audio.js';
 import { createMeetingPage } from './notion.js';
 import { getLogger } from './logger.js';
 import { loadGuildConfig } from './config.js';
@@ -26,9 +29,15 @@ import { uploadSession } from './drive.js';
 
 const log = getLogger('pipeline');
 
-export type PipelineStage = 'transcribe' | 'summary' | 'drive' | 'notion';
+export type PipelineStage = 'mp3' | 'transcribe' | 'summary' | 'drive' | 'notion';
 
-export const PIPELINE_STAGES: PipelineStage[] = ['transcribe', 'summary', 'drive', 'notion'];
+export const PIPELINE_STAGES: PipelineStage[] = [
+  'mp3',
+  'transcribe',
+  'summary',
+  'drive',
+  'notion',
+];
 
 export const PIPELINE_STATE_FILENAME = 'pipeline-state.json';
 
@@ -45,6 +54,7 @@ export interface PipelineState {
   guildId: string | null;
   files: { userId: string; filename: string }[];
   participants: string[];
+  /** MP3 ステージで生成される mixed.mp3 のフルパス。未生成時は ''（MP3 ステージ未完了）。 */
   mixedMp3Path: string;
   /** AIP-37: ユーザー別 WAV（話者識別 transcribe 用）。無ければ mixed.mp3 でフォールバック。 */
   userWavs?: { userId: string; wavPath: string }[];
@@ -55,6 +65,11 @@ export interface PipelineState {
   completedStages: PipelineStage[];
 
   // 各ステージの結果
+  mp3?: {
+    mixedMp3Path: string;
+    inputCount: number;
+    durationSec: number;
+  };
   transcript?: {
     transcriptPath: string;
     segments: number;
@@ -77,7 +92,11 @@ export interface PipelineInput {
   sessionId: string;
   startedAt: Date;
   durationMs: number;
-  mixedMp3Path: string;
+  /**
+   * 事前に mixed.mp3 が生成済みの場合のみ指定。
+   * 通常は MP3 ステージ内で processSession が生成するので未指定で良い。
+   */
+  mixedMp3Path?: string;
   channelName?: string | null;
   textChannelId?: string | null;
   /** AIP-38: Guild ID（マルチ Guild 対応）。null/未指定なら process.env を使う（後方互換）。 */
@@ -131,7 +150,7 @@ function createInitialState(input: PipelineInput): PipelineState {
     guildId: input.guildId ?? null,
     files: input.files ?? [],
     participants: input.participants ?? [],
-    mixedMp3Path: input.mixedMp3Path,
+    mixedMp3Path: input.mixedMp3Path ?? '',
     userWavs: input.userWavs,
     speakerNames: input.speakerNames,
     completedStages: [],
@@ -160,6 +179,12 @@ async function getOrInitState(input: PipelineInput): Promise<PipelineState> {
   if (input.speakerNames) existing.speakerNames = input.speakerNames;
   // AIP-38: guildId は新規入力で上書き（resume 時に呼び出し側の interaction.guildId を使う）
   if (input.guildId !== undefined) existing.guildId = input.guildId;
+  // files は新規入力があれば差し替え（resume で files=[] の state を上書きしたいケースに対応）
+  if (input.files && input.files.length > 0) {
+    existing.files = input.files;
+  }
+  // 事前に MP3 がある場合のみ上書き（指定なしなら既存維持）
+  if (input.mixedMp3Path) existing.mixedMp3Path = input.mixedMp3Path;
   await savePipelineState(existing);
   return existing;
 }
@@ -230,6 +255,32 @@ export async function runPostMp3Pipeline(
 ): Promise<PipelineState> {
   const state = await getOrInitState(input);
 
+  // Step 0: MP3 mix（AIP-39: 失敗時にも state が残るよう MP3 をパイプライン内に組み込む）
+  const rMp3 = await runStage('mp3', state, callbacks, async () => {
+    // 既に MP3 がディスク上にあればスキップ（resume で誤って再実行しないため）
+    if (state.mixedMp3Path && existsSync(state.mixedMp3Path)) {
+      log.info(`mp3 already exists, skipping: ${state.mixedMp3Path}`);
+      return;
+    }
+    if (state.files.length === 0) {
+      throw new Error('no opusraw files to mix');
+    }
+    const result = await processSession(state.sessionDir, state.files);
+    if (!result.mixedMp3) {
+      throw new Error('no audio to mix (no opus packets decoded)');
+    }
+    state.mixedMp3Path = result.mixedMp3;
+    if (result.userWavs.length > 0) {
+      state.userWavs = result.userWavs;
+    }
+    state.mp3 = {
+      mixedMp3Path: result.mixedMp3,
+      inputCount: result.inputCount,
+      durationSec: result.durationSec,
+    };
+  });
+  if (!rMp3.ok) return state;
+
   // Step 1: transcribe
   // AIP-37: userWavs があり、ディスクに実在するものが1つ以上あればユーザー別 transcribe（話者識別）。
   // 無ければ従来通り mixed.mp3 を一括 transcribe（後方互換）。
@@ -241,7 +292,7 @@ export async function runPostMp3Pipeline(
       );
       const r = await transcribeUsersAndSave(
         usableUserWavs,
-        input.sessionDir,
+        state.sessionDir,
         state.speakerNames ?? {},
       );
       state.transcript = {
@@ -252,7 +303,7 @@ export async function runPostMp3Pipeline(
       };
     } else {
       log.info('transcribe (single): mixed.mp3 一括（userWavs なし、後方互換フロー）');
-      const r = await transcribeAndSave(input.mixedMp3Path);
+      const r = await transcribeAndSave(state.mixedMp3Path);
       state.transcript = {
         transcriptPath: r.transcriptPath,
         segments: r.result.segments.length,
@@ -280,9 +331,9 @@ export async function runPostMp3Pipeline(
       throw new Error('prerequisite stage missing');
     }
     const r = await uploadSession(
-      input.sessionDir,
+      state.sessionDir,
       [
-        basename(input.mixedMp3Path),
+        basename(state.mixedMp3Path),
         basename(state.transcript.transcriptPath),
         basename(state.summary.summaryPath),
       ],
@@ -307,7 +358,7 @@ export async function runPostMp3Pipeline(
     // AIP-37: transcript.json から segments を読んで Notion 本文に話者付き発言を埋め込む
     const transcriptRaw = await readFile(state.transcript.transcriptPath, 'utf-8');
     const transcript = JSON.parse(transcriptRaw) as TranscribeResult;
-    const mp3Url = state.drive.fileUrls[basename(input.mixedMp3Path)];
+    const mp3Url = state.drive.fileUrls[basename(state.mixedMp3Path)];
     const transcriptUrl = state.drive.fileUrls[basename(state.transcript.transcriptPath)];
     const r = await createMeetingPage({
       summary,
