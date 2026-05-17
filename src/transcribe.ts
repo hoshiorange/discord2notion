@@ -112,20 +112,33 @@ async function spawnTranscribe(audioPath: string): Promise<TranscribeResult> {
         reject(new Error(`transcribe.py timeout after ${timeoutMs}ms`));
         return;
       }
+      // stdout に有効な JSON があれば exit code に関わらず成功扱い。
+      // faster-whisper / CTranslate2 のデストラクタが CUDA 解放時に Windows で
+      // 0xC0000409 (exit code 3221226505) で死ぬが、JSON 出力は完了している。
+      // 保険として transcribe.py 側でも os._exit を使うが、こちらも残しておく。
+      if (stdout.trim()) {
+        try {
+          const result = JSON.parse(stdout) as TranscribeResult;
+          if (code !== 0) {
+            log.warn(
+              `transcribe.py produced valid JSON but exited with code ${code} (treating as success)`,
+            );
+          }
+          resolve(result);
+          return;
+        } catch {
+          // JSON でなければ下の exit-code ベースの reject にフォールスルー
+        }
+      }
       if (code !== 0) {
         reject(new Error(`transcribe.py exited with code ${code}\n${stderr.slice(-500)}`));
         return;
       }
-      try {
-        const result = JSON.parse(stdout) as TranscribeResult;
-        resolve(result);
-      } catch (err) {
-        reject(
-          new Error(
-            `failed to parse stdout as JSON: ${(err as Error).message}\nstdout head: ${stdout.slice(0, 500)}`,
-          ),
-        );
-      }
+      reject(
+        new Error(
+          `transcribe.py exited 0 but produced no parseable JSON\nstdout head: ${stdout.slice(0, 500)}`,
+        ),
+      );
     });
 
     proc.on('error', (err) => {
