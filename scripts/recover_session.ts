@@ -5,7 +5,11 @@
  * MP3 → 文字起こし → 要約 → Drive → Notion を一気通貫で実行する。
  *
  * 使い方:
- *   npx tsx scripts/recover_session.ts <sessionId> [guildId]
+ *   npx tsx scripts/recover_session.ts <sessionId> [guildId] [options]
+ *
+ * Options:
+ *   --speaker <userId>=<name>   speakerNames に追加（複数指定可）
+ *   --duration-min <分>         会議時間を分単位で明示指定（既定: opusraw の mtime から推定）
  *
  * guildId 未指定時は process.env の NOTION_API_KEY / GOOGLE_DRIVE_* がそのまま使われる。
  * Guild 別 config を当てたい場合は config/guilds/<guildId>.json が存在する guildId を渡す。
@@ -31,13 +35,67 @@ function parseTimestampFromSessionId(sessionId: string): Date | null {
   );
 }
 
-async function main(): Promise<void> {
-  const sessionId = process.argv[2];
-  const guildId = process.argv[3] ?? null;
+interface CliArgs {
+  sessionId: string;
+  guildId: string | null;
+  speakerOverrides: Record<string, string>;
+  durationMinOverride: number | null;
+}
+
+function parseArgs(argv: string[]): CliArgs {
+  const positional: string[] = [];
+  const speakerOverrides: Record<string, string> = {};
+  let durationMinOverride: number | null = null;
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--speaker') {
+      const v = argv[++i];
+      if (!v || !v.includes('=')) {
+        throw new Error(`--speaker は <userId>=<name> 形式で指定: ${v}`);
+      }
+      const idx = v.indexOf('=');
+      speakerOverrides[v.slice(0, idx).trim()] = v.slice(idx + 1).trim();
+    } else if (a === '--duration-min') {
+      const v = argv[++i];
+      const n = Number.parseFloat(v ?? '');
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error(`--duration-min は正の数値: ${v}`);
+      }
+      durationMinOverride = n;
+    } else if (a?.startsWith('--')) {
+      throw new Error(`未知のオプション: ${a}`);
+    } else if (a) {
+      positional.push(a);
+    }
+  }
+
+  const sessionId = positional[0];
   if (!sessionId) {
-    console.error('Usage: npx tsx scripts/recover_session.ts <sessionId> [guildId]');
+    throw new Error('sessionId が指定されていません');
+  }
+  return {
+    sessionId,
+    guildId: positional[1] ?? null,
+    speakerOverrides,
+    durationMinOverride,
+  };
+}
+
+async function main(): Promise<void> {
+  let args: CliArgs;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error((err as Error).message);
+    console.error(
+      'Usage: npx tsx scripts/recover_session.ts <sessionId> [guildId] '
+        + '[--speaker <userId>=<name> ...] [--duration-min <分>]',
+    );
     process.exit(1);
   }
+
+  const { sessionId, guildId, speakerOverrides, durationMinOverride } = args;
 
   const sessionDir = resolvePath(process.cwd(), 'recordings', sessionId);
   let entries: string[];
@@ -67,17 +125,31 @@ async function main(): Promise<void> {
   );
   const dirStat = statSync(sessionDir);
   const startedAt = parseTimestampFromSessionId(sessionId) ?? new Date(dirStat.birthtimeMs);
-  const durationMs = Math.max(0, opusrawMaxMtime - startedAt.getTime());
+  const durationMs = durationMinOverride !== null
+    ? Math.round(durationMinOverride * 60 * 1000)
+    : Math.max(0, opusrawMaxMtime - startedAt.getTime());
+
+  // speakerNames: 引数で渡されたものを優先、無ければ userId をそのまま speaker に
+  const speakerNames: Record<string, string> = {};
+  for (const f of opusrawFiles) {
+    speakerNames[f.userId] = speakerOverrides[f.userId] ?? f.userId;
+  }
+  const participants = opusrawFiles.map((f) => speakerNames[f.userId] ?? f.userId);
 
   console.log(`Recovering session ${sessionId}`);
   console.log(`  sessionDir: ${sessionDir}`);
   console.log(`  opusraw files: ${opusrawFiles.length}`);
   for (const f of opusrawFiles) {
     const s = statSync(f.filename);
-    console.log(`    - ${f.userId}: ${(s.size / 1024 / 1024).toFixed(1)} MB`);
+    console.log(
+      `    - ${f.userId} (${speakerNames[f.userId]}): ${(s.size / 1024 / 1024).toFixed(1)} MB`,
+    );
   }
   console.log(`  startedAt: ${startedAt.toISOString()}`);
-  console.log(`  durationMs: ${durationMs} (${(durationMs / 60000).toFixed(1)} min)`);
+  console.log(
+    `  durationMs: ${durationMs} (${(durationMs / 60000).toFixed(1)} min)`
+      + (durationMinOverride !== null ? ' [overridden by --duration-min]' : ''),
+  );
   console.log(`  guildId: ${guildId ?? '(none — using default .env)'}`);
   console.log();
 
@@ -100,8 +172,8 @@ async function main(): Promise<void> {
       startedAt,
       durationMs,
       files: opusrawFiles,
-      participants: opusrawFiles.map((f) => f.userId),
-      speakerNames: Object.fromEntries(opusrawFiles.map((f) => [f.userId, f.userId])),
+      participants,
+      speakerNames,
       guildId,
       channelName: null,
       textChannelId: null,
